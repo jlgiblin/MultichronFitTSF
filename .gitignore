@@ -1,0 +1,27 @@
+# MATLAB
+*.asv
+*.mex*
+*.mlapp
+*.slx
+*.slxc
+
+# Output folders (if you don't want to track results)
+figures_svg/
+*.svg
+
+# Large output CSVs you don't want in the repo
+grain_posteriors_*.csv
+
+# Your personal catchment data folders (keep example/ but ignore real data)
+WP/
+TC/
+OP/
+DraftOutput/
+Drafts/
+Documents/
+
+# Mac junk
+.DS_Store
+
+# Windows junk
+Thumbs.db
