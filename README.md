@@ -188,10 +188,10 @@ history has been inspected:
 tsf_mode                    = "fixed"; % config TSFMode can override this
 tsf_update_fraction         = 0.4;
 tsf_smooth_span             = 3;
-tsf_nnls_max_outer          = 10;
-tsf_nnls_hypsometry_pull    = 0.25;
-tsf_nnls_smoothness         = 1.0;
-tsf_nnls_no_improve_patience = 3;
+iterative_max_outer          = 10;
+iterative_hypsometry_pull    = 0.25;
+iterative_smoothness         = 1.0;
+iterative_no_improve_patience = 3;
 do_bootstrap                = false;
 ```
 
@@ -204,8 +204,8 @@ After the unbootstrapped iterative run has been checked for convergence, use
 a small uncertainty pilot before a final run:
 
 ```matlab
-tsf_nnls_max_outer         = 40;  % main-data solution
-tsf_nnls_boot_max_outer    = 20;  % cap within each resample
+iterative_max_outer         = 40;  % main-data solution
+iterative_boot_max_outer    = 20;  % cap within each resample
 do_bootstrap               = true;
 n_boot                     = 20;
 ```

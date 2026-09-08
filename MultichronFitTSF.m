@@ -90,17 +90,9 @@
 %   figures_svg/
 %
 % CHANGELOG
-%   v5.3: Grouped Gallagher-NNLS bootstrap support. Every resample now
-%         re-estimates its apatite and zircon TSFs with the guarded
-%         alternating inversion; group-specific TSF intervals and
-%         convergence diagnostics are written to CSV.
-%   v5.1: Optional one-step shared light-TSF sensitivity refit.
-%         Fixed-hypsometry solution retained for direct comparison.
-%         Shared TSF weights and relative-yield diagnostics added.
-%   v5.2: Experimental regularized Gallagher-style NNLS TSF mode.
-%         The TSF and A(z) are alternately updated to convergence, with
-%         hypsometry and curvature penalties used to limit non-uniqueness.
-%         Light-mode bootstrap now re-estimates the TSF in every resample.
+%   v6 : User-facing fixed/iterative source-weighting modes; explicit,
+%        optional grouping and closure temperatures in the config table;
+%        iterative bootstrap and source-weight convergence diagnostics.
 %   v5 : Joint fminunc optimizer with Tc-scaled pairwise ordering penalty.
 %        Name-variant lookup for flexible chronometer labelling.
 %        Ordering diagnostics (violation log, penalty contributions).
@@ -170,9 +162,9 @@ delta_min_Ma = 1.0;
 %
 % tsf_update_fraction controls the departure from hypsometry:
 %   0 = fixed hypsometry; 1 = full one-step posterior weight update.
-% A value of 0.4 is deliberately conservative for sensitivity testing.
+% A value of 0.4 provides a conservative default relaxation step.
 % In iterative mode it is the relaxation step from the current weights
-% toward the newly estimated regularized NNLS target.
+% toward the newly estimated regularized nonnegative least-squares target.
 %
 % tsf_smooth_span is a moving-mean span in equal-area bin index. Use 1 to
 % disable smoothing. These values can be overridden on the Hypsometry row
@@ -184,14 +176,14 @@ tsf_mode            = "fixed";
 tsf_update_fraction = 0.4;
 tsf_smooth_span     = 3;
 
-% Iterative NNLS settings. These are ignored in fixed mode.
-tsf_nnls_max_outer       = 40;
-tsf_nnls_weight_tol      = 1e-4;
-tsf_nnls_nll_tol         = 1e-3;
-tsf_nnls_hypsometry_pull = 0.25;
-tsf_nnls_smoothness      = 1.0;
-tsf_nnls_no_improve_patience = 3;
-tsf_nnls_boot_max_outer  = 20;  % per-resample cap (limits bootstrap cost)
+% Iterative source-weight settings. These are ignored in fixed mode.
+iterative_max_outer       = 40;
+iterative_weight_tol      = 1e-4;
+iterative_nll_tol         = 1e-3;
+iterative_hypsometry_pull = 0.25;
+iterative_smoothness      = 1.0;
+iterative_no_improve_patience = 3;
+iterative_boot_max_outer  = 20;  % per-resample cap (limits bootstrap cost)
 %% ----------------------------------------------------------------------
 
 
@@ -275,13 +267,6 @@ if any(strcmpi(cfg.Properties.VariableNames, 'TSFSmoothSpan'))
     end
 end
 
-if tsf_mode == "gallagher_grouped"
-    warning("TSFMode='gallagher_grouped' is deprecated; using 'iterative'.");
-    tsf_mode = "iterative";
-elseif any(tsf_mode == ["light", "gallagher_nnls"])
-    error("TSFMode='%s' was a prototype option. Use 'fixed' or 'iterative'.", ...
-        tsf_mode);
-end
 if ~any(tsf_mode == ["fixed", "iterative"])
     error("TSFMode must be 'fixed' or 'iterative'; received '%s'.", tsf_mode);
 end
@@ -295,24 +280,24 @@ if ~isscalar(tsf_smooth_span) || ~isfinite(tsf_smooth_span) || ...
 end
 tsf_smooth_span = round(tsf_smooth_span);
 
-if ~isscalar(tsf_nnls_max_outer) || tsf_nnls_max_outer < 1 || ...
-        tsf_nnls_max_outer ~= round(tsf_nnls_max_outer)
-    error("tsf_nnls_max_outer must be a positive integer.");
+if ~isscalar(iterative_max_outer) || iterative_max_outer < 1 || ...
+        iterative_max_outer ~= round(iterative_max_outer)
+    error("iterative_max_outer must be a positive integer.");
 end
-if ~isscalar(tsf_nnls_no_improve_patience) || ...
-        tsf_nnls_no_improve_patience < 1 || ...
-        tsf_nnls_no_improve_patience ~= round(tsf_nnls_no_improve_patience)
-    error("tsf_nnls_no_improve_patience must be a positive integer.");
+if ~isscalar(iterative_no_improve_patience) || ...
+        iterative_no_improve_patience < 1 || ...
+        iterative_no_improve_patience ~= round(iterative_no_improve_patience)
+    error("iterative_no_improve_patience must be a positive integer.");
 end
-if ~isscalar(tsf_nnls_boot_max_outer) || tsf_nnls_boot_max_outer < 1 || ...
-        tsf_nnls_boot_max_outer ~= round(tsf_nnls_boot_max_outer)
-    error("tsf_nnls_boot_max_outer must be a positive integer.");
+if ~isscalar(iterative_boot_max_outer) || iterative_boot_max_outer < 1 || ...
+        iterative_boot_max_outer ~= round(iterative_boot_max_outer)
+    error("iterative_boot_max_outer must be a positive integer.");
 end
-if any(~isfinite([tsf_nnls_weight_tol, tsf_nnls_nll_tol, ...
-                  tsf_nnls_hypsometry_pull, tsf_nnls_smoothness])) || ...
-        any([tsf_nnls_weight_tol, tsf_nnls_nll_tol, ...
-             tsf_nnls_hypsometry_pull, tsf_nnls_smoothness] < 0)
-    error("Gallagher-NNLS tolerances and regularization settings must be finite and nonnegative.");
+if any(~isfinite([iterative_weight_tol, iterative_nll_tol, ...
+                  iterative_hypsometry_pull, iterative_smoothness])) || ...
+        any([iterative_weight_tol, iterative_nll_tol, ...
+             iterative_hypsometry_pull, iterative_smoothness] < 0)
+    error("Iterative source-weight tolerances and regularization settings must be finite and nonnegative.");
 end
 hypsometry_file = fullfile(catchment_dir, cfg.File(hyps_mask));
 chron_cfg       = cfg(chron_mask, :);
@@ -324,15 +309,15 @@ fprintf("w_order         : %.2f\n", w_order);
 fprintf("delta_min_Ma    : %.2f\n", delta_min_Ma);
 fprintf("TSF mode        : %s\n", tsf_mode);
 if tsf_mode == "iterative"
-    fprintf("TSF NNLS update : relaxation=%.2f  smooth span=%d bins\n", ...
+    fprintf("Iterative update : relaxation=%.2f  smooth span=%d bins\n", ...
         tsf_update_fraction, tsf_smooth_span);
-    fprintf("TSF NNLS reg.   : hypsometry=%.3g  smoothness=%.3g  max outer=%d\n", ...
-        tsf_nnls_hypsometry_pull, tsf_nnls_smoothness, tsf_nnls_max_outer);
-    fprintf("TSF NNLS guard  : stop after %d consecutive non-improving iterations\n", ...
-        tsf_nnls_no_improve_patience);
+    fprintf("Regularization   : hypsometry=%.3g  smoothness=%.3g  max outer=%d\n", ...
+        iterative_hypsometry_pull, iterative_smoothness, iterative_max_outer);
+    fprintf("Stopping rule    : stop after %d consecutive non-improving iterations\n", ...
+        iterative_no_improve_patience);
     if do_bootstrap
-        fprintf("TSF bootstrap   : re-estimate source weights, max outer=%d per resample\n", ...
-            tsf_nnls_boot_max_outer);
+        fprintf("Iterative bootstrap: re-estimate source weights, max outer=%d per resample\n", ...
+            iterative_boot_max_outer);
     end
 end
 fprintf("\n");
@@ -743,7 +728,7 @@ tauhat_fixed = tauhat_all;
     Ahat_fixed, tauhat_fixed, chron_data, ok_idx, pz);
 
 tsf_weights = pz;
-tsf_nnls_raw = nan(Nz, 1);
+source_weight_raw = nan(Nz, 1);
 chron_tsf_group = repmat("fixed_hypsometry", n_chron, 1);
 TSFConvergence = table();
 
@@ -768,34 +753,34 @@ if tsf_mode == "iterative"
     theta_current = theta_fixed_hat;
     nll_previous = nll_fixed;
 
-    % Retain the best-likelihood state. The NNLS density objective and the
+    % Retain the best-likelihood state. The source-weight density objective and the
     % grain likelihood are related but not identical, so alternating updates
     % are not guaranteed to improve both (an issue exposed by the TC pilot).
     best_theta       = theta_fixed_hat;
     best_weights     = weights_current;
-    best_nnls_raw    = raw_current;
+    best_source_weight_raw = raw_current;
     best_nll         = nll_fixed;
     best_iteration   = 0;
     no_improve_count = 0;
     stopped_no_improve = false;
 
-    hist_iter       = nan(tsf_nnls_max_outer, 1);
-    hist_nll        = nan(tsf_nnls_max_outer, 1);
-    hist_nll_change = nan(tsf_nnls_max_outer, 1);
-    hist_max_dw     = nan(tsf_nnls_max_outer, 1);
-    hist_tv         = nan(tsf_nnls_max_outer, 1);
-    hist_nnls_sse   = nan(tsf_nnls_max_outer, 1);
-    hist_nnls_rows  = nan(tsf_nnls_max_outer, 1);
+    hist_iter       = nan(iterative_max_outer, 1);
+    hist_nll        = nan(iterative_max_outer, 1);
+    hist_nll_change = nan(iterative_max_outer, 1);
+    hist_max_dw     = nan(iterative_max_outer, 1);
+    hist_tv         = nan(iterative_max_outer, 1);
+    hist_weight_sse  = nan(iterative_max_outer, 1);
+    hist_weight_rows = nan(iterative_max_outer, 1);
     converged = false;
 
-    for outer = 1:tsf_nnls_max_outer
+    for outer = 1:iterative_max_outer
         [A_current, tau_current] = unpack_joint( ...
             theta_current, chron_data, ok_idx, Nz);
 
         weights_new = weights_current;
         raw_new     = raw_current;
-        nnls_sse    = 0;
-        nnls_rows   = 0;
+        weight_fit_sse  = 0;
+        weight_fit_rows = 0;
 
         for g = 1:numel(tsf_group_names)
             members = tsf_group_indices{g};
@@ -805,10 +790,10 @@ if tsf_mode == "iterative"
                 sse_g = 0;
                 rows_g = 0;
             else
-                [raw_g, sse_g, rows_g] = gallagher_nnls_tsf_update( ...
+                [raw_g, sse_g, rows_g] = estimate_source_weights_nnls( ...
                     A_current, tau_current, chron_data, members, pz, ...
-                    age_grid_step, tsf_nnls_hypsometry_pull, ...
-                    tsf_nnls_smoothness);
+                    age_grid_step, iterative_hypsometry_pull, ...
+                    iterative_smoothness);
                 target_g = raw_g;
                 if tsf_smooth_span > 1
                     target_g = smoothdata(target_g, 'movmean', tsf_smooth_span);
@@ -830,14 +815,14 @@ if tsf_mode == "iterative"
                         sum(weights_new(:,c_group));
                 end
             end
-            nnls_sse  = nnls_sse + sse_g;
-            nnls_rows = nnls_rows + rows_g;
+            weight_fit_sse  = weight_fit_sse + sse_g;
+            weight_fit_rows = weight_fit_rows + rows_g;
         end
 
-        nnls_obj = @(th) nll_joint(th, chron_data, ok_idx, weights_new, Nz, ...
-                                    pair_lo, pair_hi, pair_gap, ...
-                                    w_order, delta_min_Ma);
-        [theta_new, nll_new] = fminunc(nnls_obj, theta_current, opts_joint);
+        iterative_obj = @(th) nll_joint(th, chron_data, ok_idx, weights_new, Nz, ...
+                                        pair_lo, pair_hi, pair_gap, ...
+                                        w_order, delta_min_Ma);
+        [theta_new, nll_new] = fminunc(iterative_obj, theta_current, opts_joint);
 
         max_dw = max(abs(weights_new(:) - weights_current(:)));
         nll_change = nll_new - nll_previous;
@@ -853,8 +838,8 @@ if tsf_mode == "iterative"
         hist_nll_change(outer) = nll_change;
         hist_max_dw(outer)     = max_dw;
         hist_tv(outer)         = tv_hypso;
-        hist_nnls_sse(outer)   = nnls_sse;
-        hist_nnls_rows(outer)  = nnls_rows;
+        hist_weight_sse(outer)  = weight_fit_sse;
+        hist_weight_rows(outer) = weight_fit_rows;
 
         fprintf("  outer %2d: NLL=%.4f  dNLL=%+.4g  max|dw|=%.3g  TV=%.4f\n", ...
             outer, nll_new, nll_change, max_dw, tv_hypso);
@@ -862,7 +847,7 @@ if tsf_mode == "iterative"
         if nll_new < best_nll
             best_theta       = theta_new;
             best_weights     = weights_new;
-            best_nnls_raw    = raw_new;
+            best_source_weight_raw = raw_new;
             best_nll         = nll_new;
             best_iteration   = outer;
             no_improve_count = 0;
@@ -875,15 +860,15 @@ if tsf_mode == "iterative"
         raw_current     = raw_new;
         nll_previous    = nll_new;
 
-        if outer >= 2 && max_dw <= tsf_nnls_weight_tol && ...
-                abs(nll_change) <= tsf_nnls_nll_tol
+        if outer >= 2 && max_dw <= iterative_weight_tol && ...
+                abs(nll_change) <= iterative_nll_tol
             converged = true;
             break;
         end
-        if no_improve_count >= tsf_nnls_no_improve_patience
+        if no_improve_count >= iterative_no_improve_patience
             stopped_no_improve = true;
             fprintf("  stopping: %d consecutive iterations failed to improve NLL.\n", ...
-                tsf_nnls_no_improve_patience);
+                iterative_no_improve_patience);
             break;
         end
     end
@@ -891,7 +876,7 @@ if tsf_mode == "iterative"
     n_outer = find(~isnan(hist_iter), 1, 'last');
     theta_joint_hat = best_theta;
     tsf_weights  = best_weights;
-    tsf_nnls_raw = best_nnls_raw;
+    source_weight_raw = best_source_weight_raw;
     nll_total       = best_nll;
     [Ahat_all, tauhat_all] = unpack_joint( ...
         theta_joint_hat, chron_data, ok_idx, Nz);
@@ -899,12 +884,12 @@ if tsf_mode == "iterative"
     TSFConvergence = table( ...
         hist_iter(1:n_outer), hist_nll(1:n_outer), ...
         hist_nll_change(1:n_outer), hist_max_dw(1:n_outer), ...
-        hist_tv(1:n_outer), hist_nnls_sse(1:n_outer), ...
-        hist_nnls_rows(1:n_outer), ...
+        hist_tv(1:n_outer), hist_weight_sse(1:n_outer), ...
+        hist_weight_rows(1:n_outer), ...
         'VariableNames', {'Iteration','TotalNLL','NLLChange', ...
                           'MaxAbsoluteWeightChange', ...
                           'TotalVariationFromHypsometry', ...
-                          'NNLSDataSSE','NNLSDataRows'});
+                          'SourceWeightDataSSE','SourceWeightDataRows'});
     TSFConvergence.Converged = repmat(converged, n_outer, 1);
     TSFConvergence.IsSelectedBest = hist_iter(1:n_outer) == best_iteration;
     if converged
@@ -941,7 +926,7 @@ if tsf_mode == "iterative"
         members = tsf_group_indices{g};
         member0 = members(1);
         w_g = tsf_weights(:,member0);
-        raw_g = tsf_nnls_raw(:,member0);
+        raw_g = source_weight_raw(:,member0);
         [post_g, n_group_grains] = posterior_tsf_update( ...
             Ahat_fixed, tauhat_fixed, chron_data, members, pz);
         group_col = repmat(tsf_group_names(g), Nz, 1);
@@ -953,7 +938,7 @@ if tsf_mode == "iterative"
             cumsum(pz), cumsum(w_g), repmat(n_group_grains, Nz, 1), ...
             'VariableNames', {'TSFGroup','Chronometers','FixedToHypsometry', ...
                               'Elevation_m','HypsometryWeight', ...
-                              'RawPosteriorWeightUpdate','RawNNLSWeightUpdate', ...
+                              'RawPosteriorWeightUpdate','RawEstimatedWeightUpdate', ...
                               'ModelTSFWeight','RelativeYieldVsHypsometry', ...
                               'HypsometryCDF','ModelTSFCDF','GroupGrainCount'});
         TSFTable = [TSFTable; row_group]; %#ok<AGROW>
@@ -961,10 +946,10 @@ if tsf_mode == "iterative"
     tsf_file = fullfile(catchment_dir, "source_weighting.csv");
 else
     tsf_relative_yield = tsf_weights ./ max(pz, realmin);
-    TSFTable = table(z_centers, pz, tsf_raw_update, tsf_nnls_raw, tsf_weights, ...
+    TSFTable = table(z_centers, pz, tsf_raw_update, source_weight_raw, tsf_weights, ...
         tsf_relative_yield, cumsum(pz), cumsum(tsf_weights), ...
         'VariableNames', {'Elevation_m','HypsometryWeight', ...
-                          'RawPosteriorWeightUpdate','RawNNLSWeightUpdate', ...
+                          'RawPosteriorWeightUpdate','RawEstimatedWeightUpdate', ...
                           'ModelTSFWeight', ...
                           'RelativeYieldVsHypsometry','HypsometryCDF','ModelTSFCDF'});
     tsf_file = fullfile(catchment_dir, "source_weighting.csv");
@@ -973,9 +958,9 @@ end
 TSFTable.TSFMode = repmat(tsf_mode, height(TSFTable), 1);
 TSFTable.UpdateFraction = repmat(tsf_update_fraction, height(TSFTable), 1);
 TSFTable.SmoothSpan = repmat(tsf_smooth_span, height(TSFTable), 1);
-TSFTable.NNLSHypsometryPull = repmat(tsf_nnls_hypsometry_pull, height(TSFTable), 1);
-TSFTable.NNLSSmoothness = repmat(tsf_nnls_smoothness, height(TSFTable), 1);
-TSFTable.NNLSNoImprovePatience = repmat(tsf_nnls_no_improve_patience, height(TSFTable), 1);
+TSFTable.HypsometryPull = repmat(iterative_hypsometry_pull, height(TSFTable), 1);
+TSFTable.SourceWeightSmoothness = repmat(iterative_smoothness, height(TSFTable), 1);
+TSFTable.NoImprovePatience = repmat(iterative_no_improve_patience, height(TSFTable), 1);
 TSFTable.TotalNLLFixedHypsometry = repmat(nll_fixed, height(TSFTable), 1);
 TSFTable.TotalNLLSelectedTSF = repmat(nll_total, height(TSFTable), 1);
 TSFTable.NLLChangeFromFixed = repmat(nll_total-nll_fixed, height(TSFTable), 1);
@@ -1058,7 +1043,7 @@ fprintf("Wrote %s\n\n", pen_file);
 Ab_all       = nan(Nz, n_chron, n_boot);
 taub_all     = nan(n_chron, n_boot);
 tsf_boot_all = nan(Nz, n_boot);
-tsf_boot_grouped = nan(Nz, n_chron, n_boot);
+source_weights_boot = nan(Nz, n_chron, n_boot);
 boot_tsf_fixed_nll    = nan(n_boot, 1);
 boot_tsf_selected_nll = nan(n_boot, 1);
 boot_tsf_best_iter    = nan(n_boot, 1);
@@ -1071,7 +1056,7 @@ if do_bootstrap
     if tsf_mode == "iterative"
         fprintf("  Configured source-weight groups are re-estimated in every resample.\n");
         fprintf("  Iterative weight updates are capped at %d per resample.\n", ...
-            tsf_nnls_boot_max_outer);
+            iterative_boot_max_outer);
     end
 
     opts_boot = optimoptions('fminunc', ...
@@ -1106,17 +1091,17 @@ if do_bootstrap
                 % Re-estimate configured effective source weights in
                 % this resample. The fixed-hypsometry bootstrap solution is
                 % the reference state and the likelihood guard retains the
-                % best alternating NNLS/A(z) iteration.
+                % best alternating source-weight/A(z) iteration.
                 [th_b, tsf_b, nll_selected_b, best_iter_b, eval_iters_b, ...
-                    termination_b] = fit_grouped_tsf_bootstrap( ...
+                    termination_b] = fit_iterative_source_weights_bootstrap( ...
                         th_fixed_b, nll_fixed_b, cd_boot, ok_idx, pz, Nz, ...
                         pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
                         opts_boot, tsf_group_indices, tsf_group_fixed, ...
-                        age_grid_step, tsf_nnls_hypsometry_pull, ...
-                        tsf_nnls_smoothness, tsf_update_fraction, ...
-                        tsf_smooth_span, tsf_nnls_boot_max_outer, ...
-                        tsf_nnls_weight_tol, tsf_nnls_nll_tol, ...
-                        tsf_nnls_no_improve_patience);
+                        age_grid_step, iterative_hypsometry_pull, ...
+                        iterative_smoothness, tsf_update_fraction, ...
+                        tsf_smooth_span, iterative_boot_max_outer, ...
+                        iterative_weight_tol, iterative_nll_tol, ...
+                        iterative_no_improve_patience);
 
                 boot_tsf_fixed_nll(b)    = nll_fixed_b;
                 boot_tsf_selected_nll(b) = nll_selected_b;
@@ -1133,7 +1118,7 @@ if do_bootstrap
             Ab_all(:,:,b)      = Ab;
             taub_all(:,b)      = taub;
             if tsf_mode == "iterative"
-                tsf_boot_grouped(:,:,b) = tsf_b;
+                source_weights_boot(:,:,b) = tsf_b;
             else
                 tsf_boot_all(:,b) = tsf_b;
             end
@@ -1169,10 +1154,10 @@ if do_bootstrap
 end
 
 if do_bootstrap && tsf_mode == "iterative"
-    TSFGroupBootTable = table();
+    SourceWeightBootTable = table();
     for g = 1:numel(tsf_group_names)
         member0 = tsf_group_indices{g}(1);
-        boot_g = reshape(tsf_boot_grouped(:,member0,:), Nz, n_boot);
+        boot_g = reshape(source_weights_boot(:,member0,:), Nz, n_boot);
         valid_g = boot_g(:, ~any(isnan(boot_g), 1));
         if isempty(valid_g)
             continue;
@@ -1185,7 +1170,7 @@ if do_bootstrap && tsf_mode == "iterative"
         fixed_col = repmat(tsf_group_fixed(g), Nz, 1);
         n_success_col = repmat(size(valid_g, 2), Nz, 1);
 
-        GroupBoot = table( ...
+        GroupWeightBoot = table( ...
             group_name_col, fixed_col, z_centers, pz, ...
             tsf_weights(:,member0), boot_median_g, boot_lo_g, boot_hi_g, ...
             n_success_col, ...
@@ -1193,14 +1178,14 @@ if do_bootstrap && tsf_mode == "iterative"
                 'Elevation_m','HypsometryWeight','BestFitTSFWeight', ...
                 'TSF_boot_median','TSF_boot_p16','TSF_boot_p84', ...
                 'SuccessfulResamples'});
-        TSFGroupBootTable = [TSFGroupBootTable; GroupBoot]; %#ok<AGROW>
+        SourceWeightBootTable = [SourceWeightBootTable; GroupWeightBoot]; %#ok<AGROW>
     end
 
-    if ~isempty(TSFGroupBootTable)
-        grouped_boot_file = fullfile( ...
+    if ~isempty(SourceWeightBootTable)
+        source_weight_boot_file = fullfile( ...
             catchment_dir, "source_weighting_bootstrap_CI.csv");
-        writetable(TSFGroupBootTable, grouped_boot_file);
-        fprintf("Wrote %s\n\n", grouped_boot_file);
+        writetable(SourceWeightBootTable, source_weight_boot_file);
+        fprintf("Wrote %s\n\n", source_weight_boot_file);
     end
 end
 %% ---------------- PER-CHRONOMETER OUTPUTS ----------------
@@ -1442,8 +1427,8 @@ for c = ok_idx
         cd.tau_min, cd.age_margin, cd.lambda, ...
         cd.age_min_filt, cd.age_max_filt, w_order, delta_min_Ma, Tc_vec(c), ...
         tsf_update_fraction, tsf_smooth_span, ...
-        tsf_nnls_hypsometry_pull, tsf_nnls_smoothness, ...
-        tsf_nnls_no_improve_patience, ...
+        iterative_hypsometry_pull, iterative_smoothness, ...
+        iterative_no_improve_patience, ...
         'VariableNames', {'Chronometer','Ngrains','Nexcluded', ...
                           'NLL_single','NLL_single_fixed_hypsometry', ...
                           'NLL_change_from_fixed','Tau_Ma', ...
@@ -1454,11 +1439,11 @@ for c = ok_idx
                           'Setting_AgeMargin','Setting_Lambda', ...
                           'Setting_AgeMinFilter','Setting_AgeMaxFilter', ...
                           'Setting_w_order','Setting_delta_min_Ma','Tc_degC', ...
-                          'Setting_TSFUpdateFraction', ...
-                          'Setting_TSFSmoothSpan', ...
-                          'Setting_TSFNNLSHypsometryPull', ...
-                          'Setting_TSFNNLSSmoothness', ...
-                          'Setting_TSFNNLSNoImprovePatience'})]; %#ok<AGROW>
+                          'Setting_SourceWeightUpdateFraction', ...
+                          'Setting_SourceWeightSmoothSpan', ...
+                          'Setting_IterativeHypsometryPull', ...
+                          'Setting_IterativeSmoothness', ...
+                          'Setting_IterativeNoImprovePatience'})]; %#ok<AGROW>
 
     fprintf("\n");
 end
@@ -1577,7 +1562,7 @@ end
 
 
 function w_c = tsf_for_chron(tsf_weights, c)
-% Return the TSF vector used by chronometer c from shared or grouped input.
+% Return the source-weight vector used by chronometer c.
     if isvector(tsf_weights)
         w_c = tsf_weights(:);
     else
@@ -1722,10 +1707,10 @@ function [w_update, n_grains] = posterior_tsf_update( ...
 end
 
 
-function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
+function [estimated_weights, data_sse, n_data_rows] = estimate_source_weights_nnls( ...
         A_all, tau_all, chron_data, ok_idx, w_hypso, age_step, ...
         hypsometry_pull, smoothness)
-% Estimate a shared topographic sampling function with regularized NNLS.
+% Estimate one source-weight curve with regularized nonnegative least squares.
 %
 % For each chronometer, columns of G are predicted age densities from the
 % individual elevation bins and y is the observed detrital age density.
@@ -1789,7 +1774,7 @@ function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
     end
 
     if isempty(G_all)
-        w_nnls = w_hypso(:) / sum(w_hypso);
+        estimated_weights = w_hypso(:) / sum(w_hypso);
         data_sse = NaN;
         n_data_rows = 0;
         return;
@@ -1818,14 +1803,14 @@ function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
     C = [C; sum_scale * ones(1, Nz)];
     d = [d; sum_scale];
 
-    w_nnls = lsqnonneg(C, d);
-    if sum(w_nnls) <= 0 || any(~isfinite(w_nnls))
-        w_nnls = w_hypso(:);
+    estimated_weights = lsqnonneg(C, d);
+    if sum(estimated_weights) <= 0 || any(~isfinite(estimated_weights))
+        estimated_weights = w_hypso(:);
     end
-    w_nnls = max(w_nnls(:), 1e-12);
-    w_nnls = w_nnls / sum(w_nnls);
+    estimated_weights = max(estimated_weights(:), 1e-12);
+    estimated_weights = estimated_weights / sum(estimated_weights);
 
-    data_sse = sum((G_all * w_nnls - y_all).^2);
+    data_sse = sum((G_all * estimated_weights - y_all).^2);
     n_data_rows = size(G_all, 1);
 end
 
@@ -1839,15 +1824,15 @@ end
 
 function [theta_best, weights_best, best_nll, best_iteration, ...
         evaluated_iterations, termination_reason] = ...
-        fit_grouped_tsf_bootstrap( ...
+        fit_iterative_source_weights_bootstrap( ...
             theta_fixed, nll_fixed, chron_data, ok_idx, pz, Nz, ...
             pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, opts_fit, ...
             group_indices, group_fixed, age_grid_step, hypsometry_pull, ...
             smoothness, update_fraction, smooth_span, max_outer, ...
             weight_tol, nll_tol, no_improve_patience)
-% Guarded grouped Gallagher-NNLS inversion for one bootstrap resample.
+% Guarded iterative source-weight inversion for one bootstrap resample.
 % Each resample starts from its independently fitted fixed-hypsometry state.
-% The NNLS density objective and grain likelihood are not identical, so the
+% The source-weight density objective and grain likelihood are not identical, so the
 % best-likelihood state is retained if later alternating updates deteriorate.
 
     n_chron = numel(chron_data);
@@ -1874,7 +1859,7 @@ function [theta_best, weights_best, best_nll, best_iteration, ...
             if group_fixed(g)
                 target_g = pz(:);
             else
-                target_g = gallagher_nnls_tsf_update( ...
+                target_g = estimate_source_weights_nnls( ...
                     A_current, tau_current, chron_data, members, pz, ...
                     age_grid_step, hypsometry_pull, smoothness);
                 if smooth_span > 1
@@ -1899,11 +1884,11 @@ function [theta_best, weights_best, best_nll, best_iteration, ...
             end
         end
 
-        obj_grouped = @(th) nll_joint( ...
+        obj_iterative = @(th) nll_joint( ...
             th, chron_data, ok_idx, weights_new, Nz, ...
             pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma);
         [theta_new, nll_new] = fminunc( ...
-            obj_grouped, theta_current, opts_fit);
+            obj_iterative, theta_current, opts_fit);
 
         max_dw = max(abs(weights_new(:) - weights_current(:)));
         nll_change = nll_new - nll_previous;
