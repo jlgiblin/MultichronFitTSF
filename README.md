@@ -111,12 +111,21 @@ A minimal working example with synthetic data is provided in `Example/`.
 
 ### Step 2: Georeference transects
 
-1. Place your clipped DEM and flow accumulation GeoTIFFs in the catchment subfolder, named `<catchment>_DEM.tif` and `<catchment>_flowacc.tif` (or override paths in the script)
+1. Place your clipped DEM and flow accumulation GeoTIFFs in the catchment subfolder, named `<catchment>_DEM.tif` and `<catchment>_flowacc.tif` (or override paths in the script). They must have identical dimensions and spatial references. If a raster relies on a world file, keep the matching `.tfw` beside it.
 2. Open `MultichronFitTSF_Georef.m` and set the same `catchment_name` and `base_dir`
-3. Set `chron_names` to match the chronometers you ran in Step 1
+3. Set `flow_acc_threshold` to define the channel network. There is no universal value: lower values include more headwater pixels; higher values retain only larger channels. Also review `coord_output_mode`, `elev_tolerance_m`, and `max_elevation_mismatch_m`.
 4. Run the script. Georeferenced CSVs and a diagnostic map are written to `<catchment>/georef_outputs/`
 
-**Tip:** Always inspect the diagnostic map before using georeferenced outputs as Pecube input. Check that the channel network looks physically reasonable and that representative points span the full elevation range of the catchment.
+Chronometer labels and the hypsometry filename are read automatically from the
+same config file used by Step 1. Bootstrap-CI transects are preferred when
+available; preliminary non-bootstrap transects are also supported.
+
+**Tip:** Always inspect both the diagnostic map and
+`elevation_coordinate_assignment.csv` before using georeferenced outputs as
+Pecube input. Confirm that representatives follow a reasonable channel path,
+that `UsedFallback` is false where possible, and that elevation differences
+are acceptable for the application. A lower flow threshold may be needed to
+represent high-elevation headwaters.
 
 ---
 
@@ -300,9 +309,15 @@ but are omitted from the ordering penalty.
 
 | File | Description |
 |------|-------------|
-| `predicted_bedrock_transect_<Chron>_georef.csv` | Transect with Lat, Lon, Easting, Northing, Channel_Elev_m appended |
-| `grain_expected_source_<Chron>_georef.csv` | Per-grain source with median and P16/P84 coordinates appended |
+| `elevation_coordinate_assignment.csv` | One row per elevation bin: representative coordinates, actual channel elevation, elevation mismatch, flow accumulation, candidate count, and QA flags |
+| `predicted_bedrock_transect_<Chron>_georef.csv` | Transect with requested geographic and/or projected coordinates plus coordinate-assignment QA columns |
+| `grain_expected_source_<Chron>_georef.csv` | Per-grain source with median and P16/P84 coordinates appended when those source-elevation intervals are available |
 | `<catchment>_dem_coord_assignment.svg/pdf/png` | Diagnostic map showing channel network and representative bin points |
+
+`coord_output_mode="both"` writes Lat/Lon and projected Easting/Northing when
+the DEM has a projected coordinate reference system. A geographic DEM can
+provide Lat/Lon only; use a projected DEM when Pecube or another downstream
+workflow requires coordinates in linear map units.
 
 ---
 
@@ -337,7 +352,9 @@ under-representation. Iterative bootstrap runs re-estimate every group marked
 | Bootstrap CI very wide | Few grains or flat likelihood | Increase n_boot; inspect grain distribution |
 | Source weights shift but NLL does not improve | Source weights are weakly resolved, often because the age profile is narrow or flat | Keep that group fixed with `EstimateTSF=false`; compare fixed and iterative diagnostics |
 | No channel pixels found (Step 2) | flow_acc_threshold too high, or DEM/flowacc extent mismatch | Lower threshold; check raster extents match |
-| Lat/Lon output as projected X/Y (Step 2) | DEM GeoTIFF missing embedded CRS metadata | Re-export DEM from GIS with CRS set |
+| Raster spatial-reference error (Step 2) | DEM and flow accumulation grids differ, or the flow raster is missing its world file | Reproject/resample to the DEM grid; place the matching `.tfw` beside the raster if needed |
+| `UsedFallback=true` or large elevation mismatch (Step 2) | No qualifying channel pixel lies near that modeled elevation | Lower `flow_acc_threshold`, inspect high-elevation raster coverage, and review the map before use |
+| Cannot calculate Lat/Lon (Step 2) | Projected DEM is missing usable CRS metadata | Re-export the DEM from GIS with its CRS embedded |
 
 ---
 
@@ -354,7 +371,11 @@ under-representation. Iterative bootstrap runs re-estimate every group marked
   but it may be inappropriate in structurally complex catchments.
 - **Non-uniqueness**: Multiple A(z) functions can reproduce similar detrital distributions. Allowing both A(z) and the TSF to vary increases this tradeoff. Bootstrap CIs capture grain sampling uncertainty but not this fundamental non-uniqueness.
 - **Single τ per chronometer**: τ is a scalar that absorbs all unresolved variance. It cannot distinguish kinetic dispersion from lithologic mixing from model mismatch.
-- **Channel representative point (Step 2)**: The highest-flow-accumulation pixel at each elevation is used as the representative coordinate. This approximates the trunk stream routing path but may not be appropriate in catchments with complex drainage geometry.
+- **Channel representative point (Step 2)**: Within a narrow window around
+  each modeled elevation, the highest-flow-accumulation pixel is used as the
+  representative coordinate. If no qualifying channel pixel exists, the
+  nearest one is used and flagged. This approximates a sediment-routing path
+  but may not be appropriate in catchments with complex drainage geometry.
 
 ---
 

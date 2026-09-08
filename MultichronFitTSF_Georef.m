@@ -26,13 +26,14 @@
 %
 % ---- OUTPUTS ----
 %   - predicted_bedrock_transect_<Chron>_georef.csv
-%       Same as input transect CSV plus columns: Lat, Lon, Easting, Northing,
-%       Channel_Elev_m, N_channel_pixels_in_bin
+%       Same as input transect CSV plus the requested geographic and/or
+%       projected coordinates, Channel_Elev_m, and N_channel_pixels_in_bin
 %   - grain_expected_source_<Chron>_georef.csv
-%       Same as grain source CSV plus columns: E_Lat, E_Lon (expected coords
-%       from posterior-weighted bin assignment)
-%   - dem_coord_assignment_diagnostics.png
-%       Map showing DEM hillshade, channel network, and bin representative points
+%       Same as grain source CSV plus median and P16/P84 source coordinates
+%   - elevation_coordinate_assignment.csv
+%       One row per elevation bin with coordinate/elevation mismatch QA fields
+%   - <catchment>_dem_coord_assignment.svg/pdf/png
+%       Map showing DEM hillshade, channel network, and numbered representatives
 %
 % ---- TOOLBOX REQUIREMENTS ----
 %   MATLAB Mapping Toolbox (for readgeoraster, geotiffinfo, projfwd/projinv)
@@ -60,27 +61,20 @@ base_dir       = "/path/to/your/project/folder"; % <-- change to your project fo
 % By default, assumed to live in the same catchment subfolder as your data.
 % Override with full paths if stored elsewhere.
 catchment_dir = fullfile(base_dir, catchment_name);
+config_file   = fullfile(catchment_dir, catchment_name + "_config.csv");
 dem_file      = fullfile(catchment_dir, catchment_name + "_DEM.tif");      % clipped DEM GeoTIFF
 flowacc_file  = fullfile(catchment_dir, catchment_name + "_flowacc.tif");  % flow accumulation GeoTIFF
-hypsometry_csv = fullfile(catchment_dir, catchment_name + "_Hypso.csv");
-
-% ---- Chronometers to georeference ----
-% Must match the chronometer labels used in MultichronFitTSF.m config CSV.
-% Transect and grain source files are auto-constructed from these names.
-chron_names   = ["ApHe", "ZHe", "ApPb", "Hbl"];  % <-- edit to match your chronometers
-
-% Auto-construct input file paths from catchment_dir and chron_names
-transect_files = fullfile(catchment_dir, ...
-    "predicted_bedrock_transect_" + chron_names + "_CI.csv");
-grain_files    = fullfile(catchment_dir, ...
-    "grain_expected_source_" + chron_names + ".csv");
 
 % ---- Channel definition ----
 % Pixels with flow accumulation > this value are treated as channels.
-% Start with 500 (moderate channelization). Increase to get fewer, larger
-% channels; decrease to include more of the drainage network.
-% Rule of thumb: ~1% of total catchment pixel count is a reasonable start.
+% There is no universal value: increase it to retain fewer, larger channels;
+% decrease it to include more headwater pixels. Inspect the diagnostic map
+% and elevation_coordinate_assignment.csv after every change.
 flow_acc_threshold = 100;
+
+% Warn when the assigned channel pixel differs from its modeled elevation by
+% more than this amount. This is a QA limit, not an alternate search rule.
+max_elevation_mismatch_m = 50;
 
 % ---- Coordinate output format ----
 % "geographic"  => output Lat/Lon (WGS84 decimal degrees)
@@ -90,8 +84,9 @@ coord_output_mode = "both";
 
 % ---- Elevation bin matching tolerance ----
 % When assigning a channel pixel to an elevation bin, allow pixels within
-% +/- this many meters of the bin center to count (in addition to the
-% strict bin edge assignment from hypsometry). Set 0 to use strict edges only.
+% +/- this many meters of the modeled bin center to count. The highest-flow
+% pixel in that narrow elevation window is selected. If none exists, the
+% nearest channel pixel is used and explicitly flagged for review.
 elev_tolerance_m = 10;
 
 % ---- Output directory ----
@@ -102,6 +97,44 @@ output_dir = fullfile(catchment_dir, "georef_outputs");
 %% ============================================================
 %% END USER SETTINGS
 %% ============================================================
+
+% Read the fitting config so chronometer labels and the hypsometry filename
+% always match the MultichronFitTSF run. Users do not maintain a second list.
+if ~isfile(config_file)
+    error("Config file not found: %s", config_file);
+end
+cfg = readtable(config_file, 'TextType', 'string');
+if ~all(ismember({'Chronometer','File'}, cfg.Properties.VariableNames))
+    error("Config file must contain Chronometer and File columns: %s", config_file);
+end
+hyps_mask = strcmpi(strtrim(cfg.Chronometer), 'Hypsometry');
+if nnz(hyps_mask) ~= 1
+    error("Config file must contain exactly one Hypsometry row: %s", config_file);
+end
+hypsometry_csv = fullfile(catchment_dir, cfg.File(hyps_mask));
+
+chron_names = strtrim(cfg.Chronometer(~hyps_mask));
+chron_names = chron_names(~ismissing(chron_names) & strlength(chron_names) > 0);
+if isempty(chron_names)
+    error("No chronometer rows were found in: %s", config_file);
+end
+
+% Prefer bootstrap-CI transects when present, but also support preliminary
+% non-bootstrap runs. Grain source files use the same config-derived labels.
+transect_files = strings(size(chron_names));
+for c = 1:numel(chron_names)
+    ci_candidate = fullfile(catchment_dir, ...
+        "predicted_bedrock_transect_" + chron_names(c) + "_CI.csv");
+    fit_candidate = fullfile(catchment_dir, ...
+        "predicted_bedrock_transect_" + chron_names(c) + ".csv");
+    if isfile(ci_candidate)
+        transect_files(c) = ci_candidate;
+    else
+        transect_files(c) = fit_candidate;
+    end
+end
+grain_files = fullfile(catchment_dir, ...
+    "grain_expected_source_" + chron_names + ".csv");
 
 if ~exist(output_dir, "dir"), mkdir(output_dir); end
 
@@ -117,10 +150,14 @@ fprintf("Reading flow accumulation: %s\n", flowacc_file);
 
 % Sanity check: rasters should be same size
 if ~isequal(size(dem_Z), size(acc_Z))
-    error(["DEM and flow accumulation rasters have different sizes: " ...
-           "DEM is %dx%d, FlowAcc is %dx%d. " ...
-           "Please ensure both are clipped to the same extent and resolution."], ...
+    error("DEM and flow accumulation rasters have different sizes: " + ...
+          "DEM is %dx%d, FlowAcc is %dx%d. " + ...
+          "Please ensure both are clipped to the same extent and resolution.", ...
            size(dem_Z,1), size(dem_Z,2), size(acc_Z,1), size(acc_Z,2));
+end
+if ~rasterReferencesAlign(dem_R, acc_R)
+    error("DEM and flow accumulation rasters do not share the same spatial " + ...
+          "reference. Reproject, resample, and clip them to an identical grid.");
 end
 
 fprintf("DEM size: %d rows x %d cols\n", size(dem_Z,1), size(dem_Z,2));
@@ -134,9 +171,9 @@ fprintf("Channel pixels (flow acc > %d): %d of %d total\n", ...
     flow_acc_threshold, n_channel_px, sum(~isnan(dem_Z(:))));
 
 if n_channel_px == 0
-    error(["No channel pixels found with flow_acc_threshold = %d. " ...
-           "Lower the threshold or check that your flow accumulation " ...
-           "raster covers the same area as the DEM."], flow_acc_threshold);
+    error("No channel pixels found with flow_acc_threshold = %d. " + ...
+          "Lower the threshold or check that your flow accumulation " + ...
+          "raster covers the same area as the DEM.", flow_acc_threshold);
 end
 
 %% ---- STEP 3: Get geographic coordinates of all DEM pixels ----
@@ -149,8 +186,31 @@ fprintf("Computing pixel coordinates...\n");
 % Convert pixel row/col -> geographic coordinates using the raster reference
 [lat_grid, lon_grid] = pixel2latlon(dem_R, row_grid, col_grid);
 
-% Also get projected (x/y) coordinates if available
-[x_grid, y_grid] = pixel2xy(dem_R, row_grid, col_grid);
+% Also get projected coordinates when the DEM uses a projected reference.
+is_projected_dem = isa(dem_R, 'map.rasterref.MapCellsReference') || ...
+                   isa(dem_R, 'map.rasterref.MapPostingsReference');
+if is_projected_dem
+    [x_grid, y_grid] = pixel2xy(dem_R, row_grid, col_grid);
+else
+    x_grid = nan(size(lat_grid));
+    y_grid = nan(size(lat_grid));
+end
+
+coord_output_mode = lower(strtrim(coord_output_mode));
+if ~any(coord_output_mode == ["geographic", "projected", "both"])
+    error("coord_output_mode must be geographic, projected, or both.");
+end
+if coord_output_mode == "projected" && ~is_projected_dem
+    error("coord_output_mode is projected, but the DEM has a geographic " + ...
+          "reference. Use a projected DEM or select geographic output.");
+end
+include_geographic = coord_output_mode == "geographic" || coord_output_mode == "both";
+include_projected  = (coord_output_mode == "projected" || ...
+                      coord_output_mode == "both") && is_projected_dem;
+if coord_output_mode == "both" && ~is_projected_dem
+    warning("The DEM is geographic, so projected Easting/Northing columns " + ...
+            "cannot be calculated. Writing Lat/Lon only.");
+end
 
 %% ---- STEP 4: Read hypsometry and reconstruct elevation bins ----
 fprintf("Reading hypsometry: %s\n", hypsometry_csv);
@@ -185,10 +245,23 @@ Fu = F_raw(ia);
 Fu = (Fu - Fu(1)) / (Fu(end) - Fu(1));
 Fu(1) = 0; Fu(end) = 1;
 
-% Reconstruct same bin edges as fitting script (target_bins = 20 by default)
-target_bins = 20;
-min_bins    = 8;
-target_bins = max(target_bins, min_bins);
+% Infer the number of equal-area bins from an actual transect output. This
+% remains correct if target_bins was changed in MultichronFitTSF.m.
+reference_transect_idx = find(isfile(transect_files), 1);
+if isempty(reference_transect_idx)
+    error("No predicted_bedrock_transect_<Chron>[_CI].csv files were found in %s", ...
+        catchment_dir);
+end
+reference_transect = readtable(transect_files(reference_transect_idx));
+if ~any(strcmpi(reference_transect.Properties.VariableNames, 'Elevation_m'))
+    error("Reference transect is missing Elevation_m: %s", ...
+        transect_files(reference_transect_idx));
+end
+target_bins = height(reference_transect);
+if target_bins < 2
+    error("Reference transect must contain at least two elevation bins: %s", ...
+        transect_files(reference_transect_idx));
+end
 
 Fq = linspace(0, 1, target_bins+1)';
 [Fu_u, iu] = unique(Fu, 'stable');
@@ -199,6 +272,15 @@ z_edges(1) = zu_u(1); z_edges(end) = zu_u(end);
 
 z_centers = 0.5 * (z_edges(1:end-1) + z_edges(2:end));
 Nz = numel(z_centers);
+
+reference_centers = reference_transect.Elevation_m(:);
+center_tolerance = max(1e-6, 1e-8 * max(abs(reference_centers)));
+if numel(reference_centers) ~= Nz || ...
+        max(abs(reference_centers - z_centers)) > center_tolerance
+    error("Hypsometry and transect elevation bins do not match. Confirm that " + ...
+          "the hypsometry file is the one used to create the transect outputs.");
+end
+z_centers = reference_centers;
 
 fprintf("Reconstructed %d elevation bins: %.0f – %.0f m\n", ...
     Nz, z_edges(1), z_edges(end));
@@ -212,6 +294,8 @@ bin_easting  = nan(Nz, 1);
 bin_northing = nan(Nz, 1);
 bin_channel_elev = nan(Nz, 1);
 bin_n_channel_px = zeros(Nz, 1);
+bin_used_fallback = false(Nz, 1);
+bin_flow_acc = nan(Nz, 1);
 
 % Flatten grids for channel pixels
 chan_idx  = find(channel_mask);
@@ -223,38 +307,64 @@ chan_y    = y_grid(chan_idx);
 chan_acc  = acc_Z(chan_idx);   % flow accumulation value
 
 for k = 1:Nz
-    z_lo = z_edges(k)   - elev_tolerance_m;
-    z_hi = z_edges(k+1) + elev_tolerance_m;
-
-    in_bin = (chan_elev >= z_lo) & (chan_elev < z_hi);
+    in_bin = abs(chan_elev - z_centers(k)) <= elev_tolerance_m;
 
     if ~any(in_bin)
         % Widen search: find closest channel pixel by elevation
         [~, closest] = min(abs(chan_elev - z_centers(k)));
         in_bin(closest) = true;
+        bin_used_fallback(k) = true;
         fprintf("  Bin %d (%.0f m): no channel pixel in range — using nearest (%.0f m away)\n", ...
             k, z_centers(k), abs(chan_elev(closest) - z_centers(k)));
     end
 
     bin_n_channel_px(k) = sum(in_bin);
 
-    % Among channel pixels in this bin, pick the one with HIGHEST flow
-    % accumulation — this is the most downstream (trunk stream) point at
-    % this elevation, which is the most likely sediment routing path.
-    acc_in_bin = chan_acc(in_bin);
-    [~, best]  = max(acc_in_bin);
-
+    % Within the narrow elevation window, prefer the pixel with the highest
+    % flow accumulation to favor the primary sediment-routing path.
     in_bin_idx = find(in_bin);
-    rep_idx    = in_bin_idx(best);
+    [~, best] = max(chan_acc(in_bin_idx));
+    rep_idx = in_bin_idx(best);
 
     bin_lat(k)          = chan_lat(rep_idx);
     bin_lon(k)          = chan_lon(rep_idx);
     bin_easting(k)      = chan_x(rep_idx);
     bin_northing(k)     = chan_y(rep_idx);
     bin_channel_elev(k) = chan_elev(rep_idx);
+    bin_flow_acc(k)     = chan_acc(rep_idx);
 end
 
 fprintf("Coordinate assignment complete.\n\n");
+
+bin_elev_difference = abs(bin_channel_elev - z_centers);
+bin_exceeds_mismatch = bin_elev_difference > max_elevation_mismatch_m;
+
+% Write one compact QA table before repeating these coordinates in each
+% chronometer-specific transect.
+Assignment = table((1:Nz)', z_centers, bin_channel_elev, ...
+    bin_elev_difference, bin_flow_acc, bin_n_channel_px, ...
+    bin_used_fallback, bin_exceeds_mismatch, ...
+    'VariableNames', {'Bin','Elevation_m','Channel_Elev_m', ...
+                      'Elevation_Difference_m','FlowAccumulation', ...
+                      'N_channel_px','UsedFallback','ExceedsMismatchLimit'});
+if include_geographic
+    Assignment.Lat = bin_lat;
+    Assignment.Lon = bin_lon;
+end
+if include_projected
+    Assignment.Easting_m = bin_easting;
+    Assignment.Northing_m = bin_northing;
+end
+assignment_file = fullfile(output_dir, "elevation_coordinate_assignment.csv");
+writetable(Assignment, assignment_file);
+fprintf("Wrote coordinate-assignment QA table: %s\n", assignment_file);
+
+if any(bin_exceeds_mismatch)
+    warning("%d elevation bins exceed the %.1f m coordinate-assignment " + ...
+            "mismatch limit. Lower flow_acc_threshold, inspect the " + ...
+            "diagnostic map, or verify the raster coverage.", ...
+        nnz(bin_exceeds_mismatch), max_elevation_mismatch_m);
+end
 
 % Report any bins with very few channel pixels (may indicate DEM/bin mismatch)
 sparse_bins = find(bin_n_channel_px < 3);
@@ -337,9 +447,10 @@ for k = 1:Nz
                 'MarkerEdgeColor', [0.15 0.15 0.15], ...
                 'LineWidth', 0.8, ...
                 'HandleVisibility', 'off');
-        text(ax, pc + 4, pr, ...
-             sprintf('%d  %.0f m', k, z_centers(k)), ...
-             'FontSize', 6.5, 'Color', [0.05 0.05 0.05], ...
+        text(ax, pc, pr, sprintf('%d', k), ...
+             'FontSize', 6, 'FontWeight', 'bold', ...
+             'Color', [0.05 0.05 0.05], ...
+             'HorizontalAlignment', 'center', ...
              'VerticalAlignment', 'middle', ...
              'Interpreter', 'none');
     end
@@ -351,7 +462,7 @@ title(ax, sprintf('%s — elevation bin channel representatives', catchment_name
 xlabel(ax, 'Column (pixel)', 'FontSize', 8);
 ylabel(ax, 'Row (pixel)',    'FontSize', 8);
 legend(ax, 'Channel network', ...
-       'Location', 'southwest', 'FontSize', 7, 'Box', 'off');
+       'Location', 'northeast', 'FontSize', 7, 'Box', 'off');
 
 % --- Export ---
 diag_fig_file_svg = fullfile(output_dir, catchment_name + "_dem_coord_assignment.svg");
@@ -384,12 +495,20 @@ for c = 1:numel(chron_names)
             T_elev = T.Elevation_m;
             [~, bin_idx] = min(abs(T_elev(:) - z_centers(:)'), [], 2);
 
-            T.Lat           = bin_lat(bin_idx);
-            T.Lon           = bin_lon(bin_idx);
-            T.Easting_m     = bin_easting(bin_idx);
-            T.Northing_m    = bin_northing(bin_idx);
+            if include_geographic
+                T.Lat = bin_lat(bin_idx);
+                T.Lon = bin_lon(bin_idx);
+            end
+            if include_projected
+                T.Easting_m  = bin_easting(bin_idx);
+                T.Northing_m = bin_northing(bin_idx);
+            end
             T.Channel_Elev_m = bin_channel_elev(bin_idx);
+            T.Elevation_Difference_m = abs(T_elev(:) - T.Channel_Elev_m);
+            T.FlowAccumulation = bin_flow_acc(bin_idx);
             T.N_channel_px  = bin_n_channel_px(bin_idx);
+            T.UsedFallback  = bin_used_fallback(bin_idx);
+            T.ExceedsMismatchLimit = bin_exceeds_mismatch(bin_idx);
 
             out_tfile = fullfile(output_dir, ...
                 "predicted_bedrock_transect_" + chron + "_georef.csv");
@@ -408,8 +527,8 @@ for c = 1:numel(chron_names)
         % Assign coordinates based on the MEDIAN source elevation per grain
         % (using the Median_SourceElev_m column from your existing output)
         if ~any(strcmpi(G.Properties.VariableNames, 'Median_SourceElev_m'))
-            warning(["Grain file %s missing 'Median_SourceElev_m'. " ...
-                     "Trying 'E_SourceElev_m'."], gfile);
+            warning("Grain file %s missing 'Median_SourceElev_m'. " + ...
+                    "Trying 'E_SourceElev_m'.", gfile);
             if any(strcmpi(G.Properties.VariableNames, 'E_SourceElev_m'))
                 grain_elev_col = G.E_SourceElev_m;
             else
@@ -423,19 +542,32 @@ for c = 1:numel(chron_names)
         % Match grain elevation to nearest bin
         [~, grain_bin_idx] = min(abs(grain_elev_col(:) - z_centers(:)'), [], 2);
 
-        G.Lat_median    = bin_lat(grain_bin_idx);
-        G.Lon_median    = bin_lon(grain_bin_idx);
-        G.Easting_median  = bin_easting(grain_bin_idx);
-        G.Northing_median = bin_northing(grain_bin_idx);
+        if include_geographic
+            G.Lat_median = bin_lat(grain_bin_idx);
+            G.Lon_median = bin_lon(grain_bin_idx);
+        end
+        if include_projected
+            G.Easting_median  = bin_easting(grain_bin_idx);
+            G.Northing_median = bin_northing(grain_bin_idx);
+        end
 
         % Also assign based on P16 and P84 source elevation for uncertainty range
-        if any(strcmpi(G.Properties.VariableNames, 'P16_SourceElev_m'))
+        if all(ismember({'P16_SourceElev_m','P84_SourceElev_m'}, ...
+                G.Properties.VariableNames))
             [~, g_p16] = min(abs(G.P16_SourceElev_m(:) - z_centers(:)'), [], 2);
             [~, g_p84] = min(abs(G.P84_SourceElev_m(:) - z_centers(:)'), [], 2);
-            G.Lat_p16 = bin_lat(g_p16);
-            G.Lon_p16 = bin_lon(g_p16);
-            G.Lat_p84 = bin_lat(g_p84);
-            G.Lon_p84 = bin_lon(g_p84);
+            if include_geographic
+                G.Lat_p16 = bin_lat(g_p16);
+                G.Lon_p16 = bin_lon(g_p16);
+                G.Lat_p84 = bin_lat(g_p84);
+                G.Lon_p84 = bin_lon(g_p84);
+            end
+            if include_projected
+                G.Easting_p16  = bin_easting(g_p16);
+                G.Northing_p16 = bin_northing(g_p16);
+                G.Easting_p84  = bin_easting(g_p84);
+                G.Northing_p84 = bin_northing(g_p84);
+            end
         end
 
         out_gfile = fullfile(output_dir, ...
@@ -477,6 +609,26 @@ function [Z, R] = readDEM_safe(filepath)
     end
 end
 
+function tf = rasterReferencesAlign(R1, R2)
+    % Confirm that two rasters occupy the same grid, not merely the same size.
+    if ~strcmp(class(R1), class(R2)) || ~isequal(R1.RasterSize, R2.RasterSize)
+        tf = false;
+        return;
+    end
+    if isprop(R1, 'XWorldLimits') && isprop(R1, 'YWorldLimits')
+        v1 = [R1.XWorldLimits, R1.YWorldLimits];
+        v2 = [R2.XWorldLimits, R2.YWorldLimits];
+    elseif isprop(R1, 'LatitudeLimits') && isprop(R1, 'LongitudeLimits')
+        v1 = [R1.LatitudeLimits, R1.LongitudeLimits];
+        v2 = [R2.LatitudeLimits, R2.LongitudeLimits];
+    else
+        tf = isequal(R1, R2);
+        return;
+    end
+    scale = max(1, max(abs([v1, v2])));
+    tf = max(abs(v1 - v2)) <= 1e-10 * scale;
+end
+
 function [lat, lon] = pixel2latlon(R, row, col)
     % Convert pixel row/col to geographic (lat/lon) using raster reference.
     % Handles both MapCellsReference (projected) and GeographicCellsReference.
@@ -488,11 +640,8 @@ function [lat, lon] = pixel2latlon(R, row, col)
             proj = R.ProjectedCRS;
             [lat, lon] = projinv(proj, x, y);
         catch
-            % If no CRS embedded, return projected coords as placeholders
-            warning(["DEM has no embedded projected CRS. " ...
-                     "Lat/Lon will be set to projected X/Y. " ...
-                     "For true lat/lon, ensure your GeoTIFF has CRS metadata."]);
-            lat = y; lon = x;
+            error("Projected DEM has no usable embedded CRS. Re-export the " + ...
+                  "GeoTIFF with its CRS before requesting Lat/Lon output.");
         end
     elseif isa(R, 'map.rasterref.GeographicCellsReference') || ...
            isa(R, 'map.rasterref.GeographicPostingsReference')
@@ -559,10 +708,10 @@ end
 %   DEM = fillsinks(DEM);
 %   FD  = FLOWobj(DEM);
 %   A   = flowacc(FD);
-%   GRIDobj2geotiff(A, 'TCV2_flowacc.tif');
+%   GRIDobj2geotiff(A, 'sample_flowacc.tif');
 %
 % ---- Threshold guidance ----
-%   A threshold of 500 pixels at 10m resolution = ~0.05 km2 contributing area.
-%   For small, steep Sierra Nevada catchments, try 200-1000.
-%   Visualize channel_mask as an overlay in MATLAB or in GIS to check
-%   that the network looks physically reasonable before trusting outputs.
+%   Flow accumulation is usually expressed as an upstream pixel count.
+%   The appropriate threshold depends on raster resolution and drainage
+%   geometry. Test candidate values and inspect the QA table and map;
+%   lowering the threshold includes more headwater pixels.

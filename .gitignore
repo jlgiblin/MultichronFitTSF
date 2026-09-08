@@ -7,6 +7,7 @@
 
 # Output folders (if you don't want to track results)
 figures_svg/
+georef_outputs/
 *.svg
 
 # Large output CSVs you don't want in the repo
