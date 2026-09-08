@@ -25,13 +25,13 @@
 % FOLDER STRUCTURE  (unchanged from v4)
 %   <base_dir>/
 %   ├── MultichronFitTSF.m
-%   ├── WP/
-%   │   ├── WP_config.csv
-%   │   ├── WP_Hypso.csv
-%   │   ├── WP_ApHe.csv  (columns: Date_Ma, Error_Ma)
-%   │   ├── WP_ZHe.csv
-%   │   ├── WP_ApPb.csv
-%   │   ├── WP_Hbl.csv
+%   ├── SampleA/
+%   │   ├── SampleA_config.csv
+%   │   ├── SampleA_Hypso.csv
+%   │   ├── SampleA_ApHe.csv  (columns: Date_Ma, Error_Ma)
+%   │   ├── SampleA_ZHe.csv
+%   │   ├── SampleA_ApPb.csv
+%   │   ├── SampleA_Hbl.csv
 %   │   └── figures_svg/
 %   └── ...
 %
@@ -56,11 +56,11 @@
 %
 %   Example:
 %     Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,ClosureTemperature_C,TSFMode,TSFGroup,EstimateTSF
-%     Hypsometry,WP_Hypso.csv,,,,,,,iterative,,
-%     ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
-%     ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
-%     ApPb,WP_ApPb.csv,0.1,15,0.5,0,Inf,460,,apatite,true
-%     Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
+%     Hypsometry,SampleA_Hypso.csv,,,,,,,iterative,,
+%     ApHe,SampleA_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
+%     ZHe,SampleA_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
+%     ApPb,SampleA_ApPb.csv,0.1,15,0.5,0,Inf,460,,apatite,true
+%     Hbl,SampleA_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
 %
 % CLOSURE TEMPERATURES (Tc)
 %   Prefer an explicit ClosureTemperature_C value on each chronometer row.
@@ -108,8 +108,8 @@ clear; close all; clc;
 %% ============================================================
 %% USER SETTINGS  <-- only edit these two lines between runs
 % ---- Match these two lines to your MultichronFitTSF.m settings ----
-catchment_name = "TC";                          % <-- change to your catchment name
-base_dir       = "/Users/jacquelinegiblin/Documents/MATLAB/MultichronFitTSF"; % <-- change to your project folder
+catchment_name = "SampleA";                     % <-- change to your catchment name
+base_dir       = "/path/to/MultichronFitTSF";   % <-- change to your project folder
 %% ============================================================
 
 
@@ -196,6 +196,7 @@ write_grain_posteriors = true;   % set false to skip large grain posterior CSVs
 show_optimizer_iters   = false;  % show fminunc iterations in console
 do_bootstrap           = false;  % enable after checking the primary fit
 n_boot                 = 20;     % pilot resamples (500 for final runs)
+bootstrap_random_seed  = 1;      % nonnegative integer for reproducible resampling
 ci_lo                  = 0.16;   % 68% CI lower bound
 ci_hi                  = 0.84;   % 68% CI upper bound
 target_bins            = 20;     % equal-area hypsometry bins ([] = use raw)
@@ -301,6 +302,15 @@ if any(~isfinite([iterative_weight_tol, iterative_nll_tol, ...
         any([iterative_weight_tol, iterative_nll_tol, ...
              iterative_hypsometry_pull, iterative_smoothness] < 0)
     error("Iterative source-weight tolerances and regularization settings must be finite and nonnegative.");
+end
+if ~isscalar(n_boot) || ~isfinite(n_boot) || n_boot < 1 || ...
+        n_boot ~= round(n_boot)
+    error("n_boot must be a positive integer.");
+end
+if ~isscalar(bootstrap_random_seed) || ~isfinite(bootstrap_random_seed) || ...
+        bootstrap_random_seed < 0 || ...
+        bootstrap_random_seed ~= round(bootstrap_random_seed)
+    error("bootstrap_random_seed must be a nonnegative integer.");
 end
 hypsometry_file = fullfile(catchment_dir, cfg.File(hyps_mask));
 chron_cfg       = cfg(chron_mask, :);
@@ -1054,7 +1064,9 @@ boot_tsf_eval_iters   = nan(n_boot, 1);
 boot_tsf_termination  = strings(n_boot, 1);
 
 if do_bootstrap
+    rng(bootstrap_random_seed, 'twister');
     fprintf("Phase 3: joint bootstrap (%d resamples)...\n", n_boot);
+    fprintf("  Random seed: %d\n", bootstrap_random_seed);
     fprintf("  (Each resample is a full joint fminunc solve -- may take a few minutes)\n");
     if tsf_mode == "iterative"
         fprintf("  Configured source-weight groups are re-estimated in every resample.\n");
@@ -1425,7 +1437,8 @@ for c = ok_idx
         cd.age_min_filt, cd.age_max_filt, w_order, delta_min_Ma, Tc_vec(c), ...
         tsf_update_fraction, tsf_smooth_span, ...
         iterative_hypsometry_pull, iterative_smoothness, ...
-        iterative_no_improve_patience, ...
+        iterative_no_improve_patience, do_bootstrap, n_boot, ...
+        bootstrap_random_seed, ...
         'VariableNames', {'Chronometer','Ngrains','Nexcluded', ...
                           'NLL_single','NLL_single_fixed_hypsometry', ...
                           'NLL_change_from_fixed','Tau_Ma', ...
@@ -1440,7 +1453,9 @@ for c = ok_idx
                           'Setting_SourceWeightSmoothSpan', ...
                           'Setting_IterativeHypsometryPull', ...
                           'Setting_IterativeSmoothness', ...
-                          'Setting_IterativeNoImprovePatience'})]; %#ok<AGROW>
+                          'Setting_IterativeNoImprovePatience', ...
+                          'Setting_DoBootstrap', 'Setting_NBootstrap', ...
+                          'Setting_BootstrapRandomSeed'})]; %#ok<AGROW>
 
     fprintf("\n");
 end

@@ -5,7 +5,6 @@
 A two-script MATLAB toolkit that translates detrital thermochronologic datasets into explicit, spatially referenced age–elevation constraints for thermal-kinematic models such as Pecube and A2E. Developed by J. Giblin, Arizona State University.
 
 If you use this code, please cite:
-> Giblin, J. et al. (in prep).
 > Gallagher, K., & Parra, M. (2020). A new approach to thermal history modelling with detrital thermochronological data. *Earth and Planetary Science Letters*, 529, 115872.
 
 ---
@@ -214,12 +213,15 @@ iterative_max_outer         = 40;  % main-data solution
 iterative_boot_max_outer    = 20;  % cap within each resample
 do_bootstrap               = true;
 n_boot                     = 20;
+bootstrap_random_seed      = 1;   % repeatable resampling
 ```
 
 Every resample first obtains its own fixed-hypsometry fit and then performs a
 guarded iterative source-weight inversion. This is intentionally more
 expensive than a fixed bootstrap. Inspect
-`source_weighting_bootstrap_summary.csv` before increasing `n_boot`.
+`source_weighting_bootstrap_summary.csv` before increasing `n_boot`. Keep the
+same `bootstrap_random_seed` to reproduce a run exactly, or record a different
+nonnegative integer when generating an independent set of resamples.
 
 #### Config column descriptions
 

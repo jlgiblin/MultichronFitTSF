@@ -12,7 +12,7 @@ figures_svg/
 # Large output CSVs you don't want in the repo
 grain_posteriors_*.csv
 
-# Your personal catchment data folders (keep example/ but ignore real data)
+# Local catchment data folders (keep Example/ but ignore real data)
 WP/
 TC/
 OP/
