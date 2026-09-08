@@ -181,6 +181,15 @@ ApHe and ApPb may share an `apatite` group, while a blank ZHe group remains
 independent and a poorly resolved Hbl profile may use `hornblende,false`.
 Other groupings and chronometers work without editing the source code.
 
+Keep `EstimateTSF=false` when a chronometer has little resolvable elevation
+structure, such as a very narrow or nearly flat age distribution. In that
+case the data cannot identify a unique elevation-weight curve, and flexible
+weights may fit noise or divert the alternating solver from a better joint
+solution. Set it to `true` only when estimating that chronometer's effective
+source weights is scientifically justified, then compare the NLL,
+source-weight change, convergence history, and bootstrap stability with the
+fixed result.
+
 For an initial iterative run, keep bootstrap disabled until the convergence
 history has been inspected:
 
@@ -314,6 +323,7 @@ under-representation. Iterative bootstrap runs re-estimate every group marked
 | Jagged/staircase A(z) | Flat likelihood surface | Increase Lambda (try 0.5, 1, 2) |
 | < 10 grains after filtering | Too few data | Check filter settings; chronometer skipped automatically |
 | Bootstrap CI very wide | Few grains or flat likelihood | Increase n_boot; inspect grain distribution |
+| Source weights shift but NLL does not improve | Source weights are weakly resolved, often because the age profile is narrow or flat | Keep that group fixed with `EstimateTSF=false`; compare fixed and iterative diagnostics |
 | No channel pixels found (Step 2) | flow_acc_threshold too high, or DEM/flowacc extent mismatch | Lower threshold; check raster extents match |
 | Lat/Lon output as projected X/Y (Step 2) | DEM GeoTIFF missing embedded CRS metadata | Re-export DEM from GIS with CRS set |
 
