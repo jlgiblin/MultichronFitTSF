@@ -279,7 +279,7 @@ but are omitted from the ordering penalty.
 | `summary_fit_params.csv` | One row per chronometer: grain count, NLL, τ, A_min, A_max, all settings |
 | `ordering_violations_preFit.csv` | Pre-fit ordering violation log |
 | `ordering_penalty_contributions.csv` | Post-fit per-pair penalty contributions |
-| `figures_svg/` | SVG diagnostic figures: observed vs predicted PDF, A(z) curve, hypsometry CDF comparison, grain source elevation scatter, all-chronometer joint plot |
+| `figures_svg/` | SVG diagnostic figures for the selected mode: observed vs predicted PDF, A(z) curve, source-weighting CDF, grain source elevation scatter, and all-chronometer joint plot |
 
 ### Step 2 outputs (written to `<base_dir>/<catchment_name>/georef_outputs/`)
 

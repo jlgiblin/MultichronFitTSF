@@ -1342,15 +1342,9 @@ for c = ok_idx
 
     %% ---- Remaining diagnostic figures ----
     figure('Name', sprintf('%s_Az_curve', chron)); hold on;
-    if tsf_mode ~= "fixed"
-        plot(z_centers, Ahat_fixed(:,c), '--o', 'LineWidth', 1.2);
-        plot(z_centers, Ahat, 'k-o', 'LineWidth', 1.5);
-        legend('Fixed hypsometry', 'Selected TSF refit', 'Location', 'best');
-    else
-        plot(z_centers, Ahat, 'k-o', 'LineWidth', 1.5);
-    end
+    plot(z_centers, Ahat, 'k-o', 'LineWidth', 1.5);
     xlabel('Elevation (m)'); ylabel('Predicted bedrock age A(z_k) (Ma)');
-    title(sprintf('%s: joint-fit age-elevation curve', chron));
+    title(sprintf('%s: joint-fit age-elevation curve (%s)', chron, tsf_mode));
 
     figure('Name', sprintf('%s_CDF_Hyps_vs_Implied', chron)); hold on;
     stairs(z_edges(2:end), cumsum(pz),         'LineWidth', 1.5);
@@ -1468,7 +1462,8 @@ if n_ok >= 2
         leg_entries{end+1} = chron_data(c).chron; %#ok<AGROW>
     end
     xlabel('Age (Ma)'); ylabel('Elevation (m)');
-    title(sprintf('%s: all chronometers — joint fit', catchment_name));
+    title(sprintf('%s: all chronometers — %s source weighting', ...
+        catchment_name, tsf_mode));
     legend(leg_entries, 'Location', 'best');
 
     outFigDir = fullfile(catchment_dir, "figures_svg");
