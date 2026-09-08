@@ -1565,16 +1565,15 @@ fprintf("\nDone.\n");
 %% ===============================================================
 
 function nll = nll_single(theta, age, sig, pz, AminB, AmaxB, tau_min, lambda)
-% NLL for a single chronometer (unchanged from v4 except name).
+% NLL for a single chronometer. Grain-by-bin likelihoods are evaluated as
+% one matrix because this function is called many times by the optimizer.
     Nz = numel(pz);
     [A, tau] = unpack_single(theta, Nz, AminB, AmaxB, tau_min);
-    nll = 0;
-    for i = 1:numel(age)
-        s    = sqrt(sig(i)^2 + tau^2);
-        comp = pz(:) .* normpdf(age(i), A(:), s);
-        p    = max(sum(comp), realmin);
-        nll  = nll - log(p);
-    end
+    age = age(:)';
+    combined_sigma = sqrt(sig(:)'.^2 + tau^2);
+    density = gaussian_density(age, A(:), combined_sigma);
+    mixture_probability = sum(pz(:) .* density, 1);
+    nll = -sum(log(max(mixture_probability, realmin)));
     if lambda > 0 && Nz >= 3
         d2  = A(3:end) - 2*A(2:end-1) + A(1:end-2);
         nll = nll + lambda * sum(d2.^2);
@@ -1746,13 +1745,14 @@ function [w_update, n_grains] = posterior_tsf_update( ...
 
     for c = ok_idx
         cd = chron_data(c);
-        for i = 1:cd.N
-            s    = sqrt(cd.sig(i)^2 + tau_all(c)^2);
-            comp = w_prior(:) .* normpdf(cd.age(i), A_all(:,c), s);
-            responsibility = comp / max(sum(comp), realmin);
-            weight_sum = weight_sum + responsibility;
-            n_grains   = n_grains + 1;
-        end
+        combined_sigma = sqrt(cd.sig(:)'.^2 + tau_all(c)^2);
+        likelihood = gaussian_density( ...
+            cd.age(:)', A_all(:,c), combined_sigma);
+        weighted_likelihood = w_prior(:) .* likelihood;
+        responsibility = weighted_likelihood ./ ...
+            max(sum(weighted_likelihood, 1), realmin);
+        weight_sum = weight_sum + sum(responsibility, 2);
+        n_grains   = n_grains + cd.N;
     end
 
     if n_grains == 0 || sum(weight_sum) <= 0
@@ -1804,10 +1804,8 @@ function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
         end
 
         % Observed KDE retains each grain's reported analytical error.
-        y = zeros(numel(grid), 1);
-        for i = 1:cd.N
-            y = y + normpdf(grid, age(i), max(sig(i), 1e-6));
-        end
+        y = sum(gaussian_density( ...
+            grid, age', max(sig', 1e-6)), 2);
         y_area = trapz(grid, y);
         if y_area <= 0 || ~isfinite(y_area)
             continue;
@@ -1817,12 +1815,10 @@ function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
         % Predicted density for each elevation averages over the analytical
         % error distribution of the grains and includes fitted extra scatter.
         G = zeros(numel(grid), Nz);
+        combined_sigma = sqrt(sig'.^2 + tau^2);
         for k = 1:Nz
-            for i = 1:cd.N
-                sd_i = sqrt(sig(i)^2 + tau^2);
-                G(:,k) = G(:,k) + normpdf(grid, A(k), sd_i);
-            end
-            G(:,k) = G(:,k) / cd.N;
+            G(:,k) = mean(gaussian_density( ...
+                grid, A(k), combined_sigma), 2);
             g_area = trapz(grid, G(:,k));
             if g_area > 0 && isfinite(g_area)
                 G(:,k) = G(:,k) / g_area;
@@ -1875,6 +1871,14 @@ function [w_nnls, data_sse, n_data_rows] = gallagher_nnls_tsf_update( ...
 
     data_sse = sum((G_all * w_nnls - y_all).^2);
     n_data_rows = size(G_all, 1);
+end
+
+
+function density = gaussian_density(x, mu, sigma)
+% Normal probability density with implicit expansion. Callers arrange x,
+% mu, and sigma as row/column vectors to construct the required matrix.
+    scaled = (x - mu) ./ sigma;
+    density = exp(-0.5 * scaled.^2) ./ (sqrt(2*pi) .* sigma);
 end
 
 
