@@ -19,7 +19,7 @@ For a candidate age–elevation function A(z) and dispersion parameter τ, the p
 
 where p(z_k) is the source weight of elevation bin k, σ_i is the analytical uncertainty of grain i, and τ absorbs unresolved scatter from kinetic variability, sediment mixing, and source heterogeneity. The selected source-weighting mode determines p(z_k).
 
-This differs from QTQt's detrital implementation (Gallagher & Parra, 2020) in that it solves directly for a statistically optimal age–elevation transect rather than inverting for a full thermal history. It is designed as a controlled intermediate step for incorporating detrital datasets into Pecube-style forward models.
+This differs from QTQt's detrital implementation (Gallagher & Parra, 2020) in that it solves directly for a statistically optimal age–elevation transect rather than inverting for a full thermal history. It is designed as a controlled intermediate step for incorporating detrital datasets into inverse thermal-kinematic modeling workflows that use Pecube as the forward engine.
 
 ---
 

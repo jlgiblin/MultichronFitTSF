@@ -781,7 +781,7 @@ if tsf_mode == "iterative"
 
     % Retain the best-likelihood state. The source-weight density objective and the
     % grain likelihood are related but not identical, so alternating updates
-    % are not guaranteed to improve both (an issue exposed by the TC pilot).
+    % are not guaranteed to improve both.
     best_theta       = theta_fixed_hat;
     best_weights     = weights_current;
     best_source_weight_raw = raw_current;
