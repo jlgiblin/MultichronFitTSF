@@ -197,6 +197,8 @@ show_optimizer_iters   = false;  % show fminunc iterations in console
 do_bootstrap           = false;  % enable after checking the primary fit
 n_boot                 = 20;     % pilot resamples (500 for final runs)
 bootstrap_random_seed  = 1;      % nonnegative integer for reproducible resampling
+use_parallel_bootstrap = false;  % true uses Parallel Computing Toolbox when available
+parallel_worker_count  = 4;      % [] uses the local profile default
 ci_lo                  = 0.16;   % 68% CI lower bound
 ci_hi                  = 0.84;   % 68% CI upper bound
 target_bins            = 20;     % equal-area hypsometry bins ([] = use raw)
@@ -309,8 +311,19 @@ if ~isscalar(n_boot) || ~isfinite(n_boot) || n_boot < 1 || ...
 end
 if ~isscalar(bootstrap_random_seed) || ~isfinite(bootstrap_random_seed) || ...
         bootstrap_random_seed < 0 || ...
+        bootstrap_random_seed > 2^32 - 1 || ...
         bootstrap_random_seed ~= round(bootstrap_random_seed)
-    error("bootstrap_random_seed must be a nonnegative integer.");
+    error("bootstrap_random_seed must be an integer from 0 through 2^32-1.");
+end
+if ~(islogical(use_parallel_bootstrap) || isnumeric(use_parallel_bootstrap)) || ...
+        ~isscalar(use_parallel_bootstrap)
+    error("use_parallel_bootstrap must be true or false.");
+end
+use_parallel_bootstrap = logical(use_parallel_bootstrap);
+if ~isempty(parallel_worker_count) && ...
+        (~isscalar(parallel_worker_count) || ~isfinite(parallel_worker_count) || ...
+         parallel_worker_count < 1 || parallel_worker_count ~= round(parallel_worker_count))
+    error("parallel_worker_count must be empty or a positive integer.");
 end
 hypsometry_file = fullfile(catchment_dir, cfg.File(hyps_mask));
 chron_cfg       = cfg(chron_mask, :);
@@ -1062,9 +1075,11 @@ boot_tsf_selected_nll = nan(n_boot, 1);
 boot_tsf_best_iter    = nan(n_boot, 1);
 boot_tsf_eval_iters   = nan(n_boot, 1);
 boot_tsf_termination  = strings(n_boot, 1);
+boot_error_message    = strings(n_boot, 1);
+parallel_bootstrap_active = false;
+bootstrap_workers_used    = 0;
 
 if do_bootstrap
-    rng(bootstrap_random_seed, 'twister');
     fprintf("Phase 3: joint bootstrap (%d resamples)...\n", n_boot);
     fprintf("  Random seed: %d\n", bootstrap_random_seed);
     fprintf("  (Each resample is a full joint fminunc solve -- may take a few minutes)\n");
@@ -1083,66 +1098,95 @@ if do_bootstrap
         'OptimalityTolerance',    1e-7, ...
         'StepTolerance',          1e-9);
 
+    if use_parallel_bootstrap
+        has_parallel_tools = exist('parpool', 'file') == 2 && ...
+            license('test', 'Distrib_Computing_Toolbox');
+        if has_parallel_tools
+            try
+                can_start_pool = true;
+                if exist('canUseParallelPool', 'file') == 2
+                    can_start_pool = canUseParallelPool;
+                end
+                if ~can_start_pool
+                    error("A local parallel pool is not currently available.");
+                end
+                pool = gcp('nocreate');
+                if isempty(pool)
+                    if isempty(parallel_worker_count)
+                        pool = parpool('Processes');
+                    else
+                        pool = parpool('Processes', parallel_worker_count);
+                    end
+                elseif ~isempty(parallel_worker_count) && ...
+                        pool.NumWorkers ~= parallel_worker_count
+                    warning("An existing pool has %d workers; using it instead of the requested %d.", ...
+                        pool.NumWorkers, parallel_worker_count);
+                end
+                parallel_bootstrap_active = pool.NumWorkers > 1;
+                bootstrap_workers_used = pool.NumWorkers;
+            catch ME
+                warning("Parallel bootstrap unavailable (%s). Continuing serially.", ...
+                    ME.message);
+            end
+        else
+            warning("Parallel Computing Toolbox is unavailable. Continuing serially.");
+        end
+    end
+
+    report_bootstrap_progress(n_boot, true);
+    if parallel_bootstrap_active
+        fprintf("  Parallel execution: %d process workers\n", ...
+            bootstrap_workers_used);
+        progress_queue = parallel.pool.DataQueue;
+        progress_listener = afterEach(progress_queue, ...
+            @(~) report_bootstrap_progress(n_boot, false));
+        parfor b = 1:n_boot
+            [Ab_b, taub_b, tsf_vector_b, tsf_matrix_b, fixed_nll_b, ...
+                selected_nll_b, best_iter_b, eval_iters_b, termination_b, ...
+                error_b] = run_bootstrap_replicate( ...
+                    b, bootstrap_random_seed, chron_data, ok_idx, pz, Nz, ...
+                    pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
+                    theta_fixed_hat, opts_boot, tsf_mode, ...
+                    tsf_group_indices, tsf_group_fixed, age_grid_step, ...
+                    iterative_hypsometry_pull, iterative_smoothness, ...
+                    tsf_update_fraction, tsf_smooth_span, ...
+                    iterative_boot_max_outer, iterative_weight_tol, ...
+                    iterative_nll_tol, iterative_no_improve_patience);
+            Ab_all(:,:,b)              = Ab_b;
+            taub_all(:,b)              = taub_b;
+            tsf_boot_all(:,b)          = tsf_vector_b;
+            source_weights_boot(:,:,b) = tsf_matrix_b;
+            boot_tsf_fixed_nll(b)      = fixed_nll_b;
+            boot_tsf_selected_nll(b)   = selected_nll_b;
+            boot_tsf_best_iter(b)      = best_iter_b;
+            boot_tsf_eval_iters(b)     = eval_iters_b;
+            boot_tsf_termination(b)    = termination_b;
+            boot_error_message(b)      = error_b;
+            send(progress_queue, b);
+        end
+    else
+        fprintf("  Serial execution\n");
+        for b = 1:n_boot
+            [Ab_all(:,:,b), taub_all(:,b), tsf_boot_all(:,b), ...
+                source_weights_boot(:,:,b), boot_tsf_fixed_nll(b), ...
+                boot_tsf_selected_nll(b), boot_tsf_best_iter(b), ...
+                boot_tsf_eval_iters(b), boot_tsf_termination(b), ...
+                boot_error_message(b)] = run_bootstrap_replicate( ...
+                    b, bootstrap_random_seed, chron_data, ok_idx, pz, Nz, ...
+                    pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
+                    theta_fixed_hat, opts_boot, tsf_mode, ...
+                    tsf_group_indices, tsf_group_fixed, age_grid_step, ...
+                    iterative_hypsometry_pull, iterative_smoothness, ...
+                    tsf_update_fraction, tsf_smooth_span, ...
+                    iterative_boot_max_outer, iterative_weight_tol, ...
+                    iterative_nll_tol, iterative_no_improve_patience);
+            report_bootstrap_progress(n_boot, false);
+        end
+    end
+
     for b = 1:n_boot
-        % Resample each chronometer independently, build resampled data struct
-        cd_boot = chron_data;
-        for c = ok_idx
-            N_c       = chron_data(c).N;
-            idx_b     = randi(N_c, N_c, 1);
-            cd_boot(c).age = chron_data(c).age(idx_b);
-            cd_boot(c).sig = chron_data(c).sig(idx_b);
-        end
-
-        try
-            % Step 1: fit this resample using fixed hypsometry
-            obj_fixed_b = @(th) nll_joint(th, cd_boot, ok_idx, pz, Nz, ...
-                                          pair_lo, pair_hi, pair_gap, ...
-                                          w_order, delta_min_Ma);
-
-            [th_fixed_b, nll_fixed_b] = fminunc( ...
-                obj_fixed_b, theta_fixed_hat, opts_boot);
-
-            if tsf_mode == "iterative"
-                % Re-estimate configured effective source weights in
-                % this resample. The fixed-hypsometry bootstrap solution is
-                % the reference state and the likelihood guard retains the
-                % best alternating source-weight/A(z) iteration.
-                [th_b, tsf_b, nll_selected_b, best_iter_b, eval_iters_b, ...
-                    termination_b] = fit_iterative_source_weights_bootstrap( ...
-                        th_fixed_b, nll_fixed_b, cd_boot, ok_idx, pz, Nz, ...
-                        pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
-                        opts_boot, tsf_group_indices, tsf_group_fixed, ...
-                        age_grid_step, iterative_hypsometry_pull, ...
-                        iterative_smoothness, tsf_update_fraction, ...
-                        tsf_smooth_span, iterative_boot_max_outer, ...
-                        iterative_weight_tol, iterative_nll_tol, ...
-                        iterative_no_improve_patience);
-
-                boot_tsf_fixed_nll(b)    = nll_fixed_b;
-                boot_tsf_selected_nll(b) = nll_selected_b;
-                boot_tsf_best_iter(b)    = best_iter_b;
-                boot_tsf_eval_iters(b)   = eval_iters_b;
-                boot_tsf_termination(b)  = termination_b;
-            else
-                tsf_b = pz;
-                th_b  = th_fixed_b;
-            end
-
-            [Ab, taub] = unpack_joint(th_b, cd_boot, ok_idx, Nz);
-
-            Ab_all(:,:,b)      = Ab;
-            taub_all(:,b)      = taub;
-            if tsf_mode == "iterative"
-                source_weights_boot(:,:,b) = tsf_b;
-            else
-                tsf_boot_all(:,b) = tsf_b;
-            end
-
-        catch ME
-            fprintf("  Bootstrap %d failed: %s\n", b, ME.message);
-        end
-        if n_boot <= 20 || mod(b, 50) == 0
-            fprintf("  Bootstrap %d / %d\n", b, n_boot);
+        if strlength(boot_error_message(b)) > 0
+            fprintf("  Bootstrap %d failed: %s\n", b, boot_error_message(b));
         end
     end
     valid_boot = squeeze(~any(any(isnan(Ab_all(:,ok_idx,:)), 1), 2));
@@ -1438,7 +1482,8 @@ for c = ok_idx
         tsf_update_fraction, tsf_smooth_span, ...
         iterative_hypsometry_pull, iterative_smoothness, ...
         iterative_no_improve_patience, do_bootstrap, n_boot, ...
-        bootstrap_random_seed, ...
+        bootstrap_random_seed, use_parallel_bootstrap, ...
+        bootstrap_workers_used, ...
         'VariableNames', {'Chronometer','Ngrains','Nexcluded', ...
                           'NLL_single','NLL_single_fixed_hypsometry', ...
                           'NLL_change_from_fixed','Tau_Ma', ...
@@ -1455,7 +1500,9 @@ for c = ok_idx
                           'Setting_IterativeSmoothness', ...
                           'Setting_IterativeNoImprovePatience', ...
                           'Setting_DoBootstrap', 'Setting_NBootstrap', ...
-                          'Setting_BootstrapRandomSeed'})]; %#ok<AGROW>
+                          'Setting_BootstrapRandomSeed', ...
+                          'Setting_ParallelBootstrapRequested', ...
+                          'Setting_ParallelWorkersUsed'})]; %#ok<AGROW>
 
     fprintf("\n");
 end
@@ -1937,6 +1984,91 @@ function [theta_best, weights_best, best_nll, best_iteration, ...
         termination_reason = "stopped_no_likelihood_improvement";
     else
         termination_reason = "maximum_outer_iterations";
+    end
+end
+
+
+function [Ab, taub, tsf_vector, tsf_matrix, fixed_nll, selected_nll, ...
+    best_iteration, evaluated_iterations, termination_reason, error_message] = ...
+    run_bootstrap_replicate(bootstrap_index, random_seed, chron_data, ...
+        ok_idx, pz, Nz, pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
+        theta_fixed_hat, opts_boot, tsf_mode, group_indices, group_fixed, ...
+        age_grid_step, hypsometry_pull, smoothness, update_fraction, ...
+        smooth_span, max_outer, weight_tol, nll_tol, no_improve_patience)
+% Run one independently seeded joint bootstrap resample.
+    n_chron = numel(chron_data);
+    Ab = nan(Nz, n_chron);
+    taub = nan(n_chron, 1);
+    tsf_vector = nan(Nz, 1);
+    tsf_matrix = nan(Nz, n_chron);
+    fixed_nll = nan;
+    selected_nll = nan;
+    best_iteration = nan;
+    evaluated_iterations = nan;
+    termination_reason = "";
+    error_message = "";
+
+    try
+        % A dedicated substream makes replicate b identical in serial and
+        % parallel execution, independent of worker scheduling.
+        stream_b = RandStream('Threefry', 'Seed', random_seed);
+        stream_b.Substream = bootstrap_index;
+
+        cd_boot = chron_data;
+        for c = ok_idx
+            N_c = chron_data(c).N;
+            idx_b = randi(stream_b, N_c, N_c, 1);
+            cd_boot(c).age = chron_data(c).age(idx_b);
+            cd_boot(c).sig = chron_data(c).sig(idx_b);
+        end
+
+        obj_fixed_b = @(th) nll_joint(th, cd_boot, ok_idx, pz, Nz, ...
+            pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma);
+        [theta_b, fixed_nll] = fminunc( ...
+            obj_fixed_b, theta_fixed_hat, opts_boot);
+        selected_nll = fixed_nll;
+
+        if tsf_mode == "iterative"
+            [theta_b, tsf_matrix, selected_nll, best_iteration, ...
+                evaluated_iterations, termination_reason] = ...
+                fit_iterative_source_weights_bootstrap( ...
+                    theta_b, fixed_nll, cd_boot, ok_idx, pz, Nz, ...
+                    pair_lo, pair_hi, pair_gap, w_order, delta_min_Ma, ...
+                    opts_boot, group_indices, group_fixed, age_grid_step, ...
+                    hypsometry_pull, smoothness, update_fraction, ...
+                    smooth_span, max_outer, weight_tol, nll_tol, ...
+                    no_improve_patience);
+        else
+            tsf_vector = pz;
+            best_iteration = 0;
+            evaluated_iterations = 0;
+            termination_reason = "fixed_source_weighting";
+        end
+
+        [Ab, taub] = unpack_joint(theta_b, cd_boot, ok_idx, Nz);
+    catch ME
+        error_message = string(ME.message);
+    end
+end
+
+
+function report_bootstrap_progress(n_boot, reset_counter)
+% Report ordered completion counts for serial or parallel bootstrap runs.
+    persistent n_complete start_time
+    if reset_counter || isempty(n_complete)
+        n_complete = 0;
+        start_time = tic;
+        return;
+    end
+
+    n_complete = n_complete + 1;
+    report_every = max(1, ceil(n_boot / 20));
+    if n_boot <= 20 || mod(n_complete, report_every) == 0 || ...
+            n_complete == n_boot
+        elapsed_min = toc(start_time) / 60;
+        remaining_min = elapsed_min / n_complete * (n_boot - n_complete);
+        fprintf("  Bootstrap %d / %d  |  elapsed %.1f min  |  estimated remaining %.1f min\n", ...
+            n_complete, n_boot, elapsed_min, remaining_min);
     end
 end
 

@@ -46,6 +46,8 @@ Both scripts use the same `catchment_name` / `base_dir` two-line convention and 
   mineral behavior from chronometer names
 - Iterative-mode **bootstrap uncertainty** re-estimates the configured source
   weights inside every grain resample
+- Optional **parallel bootstrap execution** with reproducible per-resample
+  random streams and automatic serial fallback
 - Config-file driven: **only two lines change** between catchment runs
 
 ---
@@ -55,6 +57,7 @@ Both scripts use the same `catchment_name` / `base_dir` two-line convention and 
 **Step 1 (`MultichronFitTSF.m`):**
 - MATLAB R2019b or later
 - Optimization Toolbox (for `fminunc`)
+- Parallel Computing Toolbox (optional, for parallel bootstrap execution)
 
 **Step 2 (`MultichronFitTSF_Georef.m`):**
 - MATLAB Mapping Toolbox (R2020b+ recommended for `readgeoraster`; falls back to `geotiffread` for older versions)
@@ -214,6 +217,8 @@ iterative_boot_max_outer    = 20;  % cap within each resample
 do_bootstrap               = true;
 n_boot                     = 20;
 bootstrap_random_seed      = 1;   % repeatable resampling
+use_parallel_bootstrap     = true;
+parallel_worker_count      = 4;   % reduce this on memory-limited systems
 ```
 
 Every resample first obtains its own fixed-hypsometry fit and then performs a
@@ -221,7 +226,10 @@ guarded iterative source-weight inversion. This is intentionally more
 expensive than a fixed bootstrap. Inspect
 `source_weighting_bootstrap_summary.csv` before increasing `n_boot`. Keep the
 same `bootstrap_random_seed` to reproduce a run exactly, or record a different
-nonnegative integer when generating an independent set of resamples.
+nonnegative integer when generating an independent set of resamples. Parallel
+mode uses the requested process-worker count when it starts a pool. If a pool
+is already open, the code uses that pool; if the toolbox or pool is unavailable,
+it reports the issue and continues serially.
 
 #### Config column descriptions
 
