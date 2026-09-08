@@ -18,7 +18,7 @@ For a candidate age–elevation function A(z) and dispersion parameter τ, the p
 
 **p(a_i) = Σ_k [ p(z_k) · N(a_i | A(z_k), σ_i² + τ²) ]**
 
-where p(z_k) is the source weight of elevation bin k, σ_i is the analytical uncertainty of grain i, and τ absorbs unresolved scatter from kinetic variability, sediment mixing, and source heterogeneity. In `fixed` mode, p(z_k) is the measured hypsometric weight. In `iterative` mode, the measured hypsometry is the starting point and regularization reference while effective source weights are allowed to vary.
+where p(z_k) is the source weight of elevation bin k, σ_i is the analytical uncertainty of grain i, and τ absorbs unresolved scatter from kinetic variability, sediment mixing, and source heterogeneity. The selected source-weighting mode determines p(z_k).
 
 This differs from QTQt's detrital implementation (Gallagher & Parra, 2020) in that it solves directly for a statistically optimal age–elevation transect rather than inverting for a full thermal history. It is designed as a controlled intermediate step for incorporating detrital datasets into Pecube-style forward models.
 
@@ -70,15 +70,15 @@ MultichronFitTSF/
 ├── MultichronFitTSF.m           ← Step 1: fit age-elevation transects
 ├── MultichronFitTSF_Georef.m    ← Step 2: georeference transects using DEM
 ├── README.md
-├── WP/                          ← example catchment subfolder
-│   ├── WP_config.csv            ← all catchment-specific settings
-│   ├── WP_Hypso.csv             ← catchment hypsometry
-│   ├── WP_ApHe.csv              ← detrital grain ages and errors
-│   ├── WP_ZHe.csv
-│   ├── WP_ApPb.csv
-│   ├── WP_Hbl.csv
-│   ├── WP_DEM.tif               ← clipped DEM GeoTIFF (Step 2)
-│   ├── WP_flowacc.tif           ← flow accumulation GeoTIFF (Step 2)
+├── SampleA/                     ← example catchment subfolder
+│   ├── SampleA_config.csv       ← all catchment-specific settings
+│   ├── SampleA_Hypsometry.csv   ← catchment hypsometry
+│   ├── SampleA_ApHe.csv         ← detrital grain ages and errors
+│   ├── SampleA_ZHe.csv
+│   ├── SampleA_ApPb.csv
+│   ├── SampleA_Hbl.csv
+│   ├── SampleA_DEM.tif          ← clipped DEM GeoTIFF (Step 2)
+│   ├── SampleA_flowacc.tif      ← flow accumulation GeoTIFF (Step 2)
 │   └── figures_svg/             ← created automatically on first run
 └── Example/                     ← minimal working example files (EX_*)
 ```
@@ -92,11 +92,11 @@ Each catchment has its own subfolder. **Only two lines in each script change bet
 ### Step 1: Fit age–elevation transects
 
 1. Clone or download this repository
-2. Create a subfolder for your catchment (e.g. `WP/`)
+2. Create a subfolder for your catchment (e.g. `SampleA/`)
 3. Place your hypsometry CSV, grain data CSVs, and config CSV in that subfolder
 4. Open `MultichronFitTSF.m` and set:
    ```matlab
-   catchment_name = "WP";
+   catchment_name = "SampleA";
    base_dir       = "/path/to/your/project/folder";
    ```
 5. Run the script. All outputs are written into the catchment subfolder.
@@ -149,17 +149,23 @@ The main file you edit between catchments. One row per chronometer plus one row 
 
 ```csv
 Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,ClosureTemperature_C,TSFMode,TSFGroup,EstimateTSF
-Hypsometry,WP_Hypso.csv,,,,,,,iterative,,
-ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
-ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
-ApPb,WP_ApPb.csv,0.1,15,0.5,0,98,460,,apatite,true
-Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
+Hypsometry,SampleA_Hypsometry.csv,,,,,,,iterative,,
+ApHe,SampleA_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
+ZHe,SampleA_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
+ApPb,SampleA_ApPb.csv,0.1,15,0.5,0,Inf,460,,apatite,true
+Hbl,SampleA_Hbl.csv,0.1,5,1.0,0,Inf,570,,hornblende,false
 ```
 
-**Optional columns on the Hypsometry row** (override global defaults):
+`TSFMode` is required on the Hypsometry row and has no default. Choose
+`fixed` to retain the measured hypsometric weights throughout the fit, or
+`iterative` to start from measured hypsometry and repeatedly estimate
+regularized effective source weights while refitting the transects. Iterative
+mode can produce different results and requires more computing time, so the
+choice should reflect the user's question and be reported with the results.
+
+**Optional columns on the Hypsometry row** (override numerical defaults):
 - `w_order`: ordering penalty weight (default 5.0)
 - `delta_min`: minimum age separation scaling in Ma (default 1.0)
-- `TSFMode`: `fixed` or `iterative`
 - `TSFUpdateFraction`: per-iteration relaxation step toward the newly
   estimated source weights (default 0.4; 0 = no update, 1 = full update)
 - `TSFSmoothSpan`: moving-mean span in equal-area bins (default 3; 1 = none)
@@ -178,23 +184,14 @@ Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
 These columns are explicit because sharing weights is a scientific choice,
 not something the code should infer from a system abbreviation. For example,
 ApHe and ApPb may share an `apatite` group, while a blank ZHe group remains
-independent and a poorly resolved Hbl profile may use `hornblende,false`.
-Other groupings and chronometers work without editing the source code.
-
-Keep `EstimateTSF=false` when a chronometer has little resolvable elevation
-structure, such as a very narrow or nearly flat age distribution. In that
-case the data cannot identify a unique elevation-weight curve, and flexible
-weights may fit noise or divert the alternating solver from a better joint
-solution. Set it to `true` only when estimating that chronometer's effective
-source weights is scientifically justified, then compare the NLL,
-source-weight change, convergence history, and bootstrap stability with the
-fixed result.
+independent. A group with little resolvable elevation structure can be held
+to measured hypsometry with `EstimateTSF=false`. Other groupings and
+chronometers work without editing the source code.
 
 For an initial iterative run, keep bootstrap disabled until the convergence
 history has been inspected:
 
 ```matlab
-tsf_mode                    = "fixed"; % config TSFMode can override this
 tsf_update_fraction         = 0.4;
 tsf_smooth_span             = 3;
 iterative_max_outer          = 10;

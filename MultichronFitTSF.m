@@ -36,13 +36,14 @@
 %   └── ...
 %
 % CONFIG CSV FORMAT  (extended from v4)
-%   Required columns (unchanged):
-%     Chronometer, File, TauMin, AgeMargin, Lambda, AgeMinFilter, AgeMaxFilter
+%   Required columns:
+%     Chronometer, File, TauMin, AgeMargin, Lambda, AgeMinFilter,
+%     AgeMaxFilter, TSFMode
+%   TSFMode must be set to fixed or iterative on the Hypsometry row.
 %   Optional global-override columns (add as single-row header + value, or
 %   place in the Hypsometry row under these column names):
 %     w_order     : ordering penalty weight  (default: see ORDERING PENALTY below)
 %     delta_min   : min age separation scale (default: see ORDERING PENALTY below)
-%     TSFMode     : fixed or iterative
 %     TSFUpdateFraction : iterative relaxation step [0,1] (default 0.4)
 %     TSFSmoothSpan     : iterative smoothing span in bins (default 3)
 %   Optional columns on each chronometer row:
@@ -146,10 +147,10 @@ delta_min_Ma = 1.0;
 
 %% ---- SOURCE-WEIGHTING MODE ----
 %
-% tsf_mode = "fixed"
+% TSFMode = "fixed"
 %   The measured hypsometry supplies the source weights throughout the fit.
 %
-% tsf_mode = "iterative"
+% TSFMode = "iterative"
 %   Flexible source-weighting analogue inspired by Gallagher & Parra (2020):
 %     1. predict a detrital age density for every elevation bin;
 %     2. estimate nonnegative, sum-to-one TSF weights by least squares;
@@ -159,6 +160,8 @@ delta_min_Ma = 1.0;
 %   share weights and which groups remain fixed. This estimates effective
 %   source contribution by elevation; it does not alter measured hypsometry
 %   or reproduce QTQt's thermal-history inversion.
+% A mode must be explicitly selected on the Hypsometry row of the config
+% file. There is no default source-weighting mode.
 %
 % tsf_update_fraction controls the departure from hypsometry:
 %   0 = fixed hypsometry; 1 = full one-step posterior weight update.
@@ -172,7 +175,7 @@ delta_min_Ma = 1.0;
 %tsf_smooth_span orginal=3
 %tsf_update_fraction=0.4
 %
-tsf_mode            = "fixed";
+tsf_mode            = "";  % required config value; intentionally no default
 tsf_update_fraction = 0.4;
 tsf_smooth_span     = 3;
 
@@ -213,7 +216,7 @@ cfg = readtable(config_file, 'TextType', 'string');
 
 % Validate required columns
 required_cols = {'Chronometer','File','TauMin','AgeMargin', ...
-                 'Lambda','AgeMinFilter','AgeMaxFilter'};
+                 'Lambda','AgeMinFilter','AgeMaxFilter','TSFMode'};
 for rc = required_cols
     if ~any(strcmpi(cfg.Properties.VariableNames, rc{1}))
         error("Config file is missing required column: %s", rc{1});
@@ -224,7 +227,7 @@ fprintf("Loaded config : %s\n",   config_file);
 fprintf("Catchment     : %s\n",   catchment_name);
 fprintf("Catchment dir : %s\n\n", catchment_dir);
 
-% ---- Check for optional config overrides on Hypsometry row ----
+% ---- Read global settings from the Hypsometry row ----
 hyps_mask  = strcmpi(cfg.Chronometer, 'Hypsometry');
 chron_mask = ~hyps_mask;
 
@@ -244,13 +247,13 @@ if any(strcmpi(cfg.Properties.VariableNames, 'delta_min')) && ...
     fprintf("Config override: delta_min_Ma = %.2f\n", delta_min_Ma);
 end
 
-if any(strcmpi(cfg.Properties.VariableNames, 'TSFMode'))
-    tsf_mode_cfg = string(hyps_row.TSFMode);
-    if ~ismissing(tsf_mode_cfg) && strlength(strtrim(tsf_mode_cfg)) > 0
-        tsf_mode = lower(strtrim(tsf_mode_cfg));
-        fprintf("Config override: TSFMode = %s\n", tsf_mode);
-    end
+tsf_mode_cfg = string(hyps_row.TSFMode);
+if ismissing(tsf_mode_cfg) || strlength(strtrim(tsf_mode_cfg)) == 0
+    error("TSFMode must be explicitly set to 'fixed' or 'iterative' " + ...
+          "on the Hypsometry row. There is no default mode.");
 end
+tsf_mode = lower(strtrim(tsf_mode_cfg));
+fprintf("Config setting: TSFMode = %s\n", tsf_mode);
 if any(strcmpi(cfg.Properties.VariableNames, 'TSFUpdateFraction'))
     tsf_alpha_cfg = double(hyps_row.TSFUpdateFraction);
     if ~isnan(tsf_alpha_cfg)
