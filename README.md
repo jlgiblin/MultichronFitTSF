@@ -18,7 +18,7 @@ For a candidate age–elevation function A(z) and dispersion parameter τ, the p
 
 **p(a_i) = Σ_k [ p(z_k) · N(a_i | A(z_k), σ_i² + τ²) ]**
 
-where p(z_k) is the hypsometric weight of elevation bin k, σ_i is the analytical uncertainty of grain i, and τ absorbs unresolved scatter from kinetic variability, sediment mixing, and source heterogeneity.
+where p(z_k) is the source weight of elevation bin k, σ_i is the analytical uncertainty of grain i, and τ absorbs unresolved scatter from kinetic variability, sediment mixing, and source heterogeneity. In `fixed` mode, p(z_k) is the measured hypsometric weight. In `iterative` mode, the measured hypsometry is the starting point and regularization reference while effective source weights are allowed to vary.
 
 This differs from QTQt's detrital implementation (Gallagher & Parra, 2020) in that it solves directly for a statistically optimal age–elevation transect rather than inverting for a full thermal history. It is designed as a controlled intermediate step for incorporating detrital datasets into Pecube-style forward models.
 
@@ -41,14 +41,12 @@ Both scripts use the same `catchment_name` / `base_dir` two-line convention and 
 - A **closure-temperature-scaled ordering penalty** enforces the physical requirement that lower-Tc systems yield younger ages than higher-Tc systems, without requiring explicit kinetic models
 - **Bootstrap uncertainty** propagated jointly across all chronometers (each resample reruns the full joint solve)
 - Per-grain **posterior source elevation distributions** computed for each chronometer
-- Optional experimental **light TSF sensitivity mode** that performs one
-  conservative shared-weight update away from hypsometry and one refit
-- Experimental **Gallagher-style NNLS mode** that alternates a regularized
-  nonnegative least-squares TSF estimate with A(z)/tau refits
-- Experimental **mineral-grouped Gallagher mode**: ApHe+ApPb share an
-  apatite TSF, ZHe has a zircon TSF, and uninformative Hbl remains hypsometric
-- Grouped-mode **bootstrap uncertainty** re-estimates the apatite and zircon
-  TSFs independently inside every grain resample
+- A clear **fixed or iterative source-weighting choice** analogous to the
+  fixed/flexible distinction in detrital QTQt workflows
+- Explicit, user-defined **source-weight groups**; the code does not infer
+  mineral behavior from chronometer names
+- Iterative-mode **bootstrap uncertainty** re-estimates the configured source
+  weights inside every grain resample
 - Config-file driven: **only two lines change** between catchment runs
 
 ---
@@ -82,8 +80,7 @@ MultichronFitTSF/
 │   ├── WP_DEM.tif               ← clipped DEM GeoTIFF (Step 2)
 │   ├── WP_flowacc.tif           ← flow accumulation GeoTIFF (Step 2)
 │   └── figures_svg/             ← created automatically on first run
-└── example/
-    └── EX/                      ← minimal working example
+└── Example/                     ← minimal working example files (EX_*)
 ```
 
 Each catchment has its own subfolder. **Only two lines in each script change between catchment runs** (`catchment_name` and `base_dir`).
@@ -104,7 +101,11 @@ Each catchment has its own subfolder. **Only two lines in each script change bet
    ```
 5. Run the script. All outputs are written into the catchment subfolder.
 
-A minimal working example with synthetic data is provided in `example/EX/`.
+The default first run leaves bootstrap off so the fit and source-weight
+convergence can be checked quickly. Then set `do_bootstrap = true` and use a
+small pilot (for example, `n_boot = 20`) before a final uncertainty run.
+
+A minimal working example with synthetic data is provided in `Example/`.
 
 ### Step 2: Georeference transects
 
@@ -146,42 +147,41 @@ The main file you edit between catchments. One row per chronometer plus one row 
 
 > **Using fewer than 4 chronometers?** No code changes needed. Simply include only the chronometers you have and leave the rest out. The joint solver automatically builds ordering constraints from whatever is present — 1 pair for 2 chronometers, 3 pairs for 3, 6 pairs for 4. With only one chronometer the script runs normally with no ordering penalty applied.
 
-```
-Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter
-Hypsometry,WP_Hypso.csv,,,,,
-ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf
-ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf
-ApPb,WP_ApPb.csv,0.1,15,0.5,0,98
-Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf
+```csv
+Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFGroup,EstimateTSF
+Hypsometry,WP_Hypso.csv,,,,,,iterative,,
+ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,,apatite,true
+ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,,zircon,true
+ApPb,WP_ApPb.csv,0.1,15,0.5,0,98,,apatite,true
+Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,,hornblende,false
 ```
 
 **Optional columns on the Hypsometry row** (override global defaults):
 - `w_order`: ordering penalty weight (default 5.0)
 - `delta_min`: minimum age separation scaling in Ma (default 1.0)
-- `TSFMode`: `fixed`, `light`, `gallagher_nnls`, or `gallagher_grouped`
-- `TSFUpdateFraction`: fraction of the one-step posterior TSF update to use
-  in light mode, or the per-iteration relaxation step in Gallagher-NNLS mode
-  (default 0.4; 0 = no update, 1 = full update)
+- `TSFMode`: `fixed` or `iterative`
+- `TSFUpdateFraction`: per-iteration relaxation step toward the newly
+  estimated source weights (default 0.4; 0 = no update, 1 = full update)
 - `TSFSmoothSpan`: moving-mean span in equal-area bins (default 3; 1 = none)
 
-Example Hypsometry row for a light-TSF sensitivity run:
+**Chronometer-row columns used in iterative mode:**
 
-```csv
-Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFUpdateFraction,TSFSmoothSpan
-Hypsometry,WP_Hypso.csv,,,,,,light,0.4,3
-```
+- `TSFGroup`: chronometers with the same label share one effective
+  source-weight curve. Labels are user-defined and case-insensitive.
+- `EstimateTSF`: `true` estimates the group's weights; `false` holds that
+  group to the measured hypsometry. All rows in one group must agree.
 
-`light` is deliberately a sensitivity test, not a fully sampled Gallagher
-and Parra TSF inversion. It first obtains the fixed-hypsometry solution,
-pools the grain posterior source probabilities across chronometers, smooths
-and shrinks that single proposed weight update toward hypsometry, and then
-refits once. Both solutions are retained in the outputs.
+These columns are explicit because sharing weights is a scientific choice,
+not something the code should infer from a system abbreviation. For example,
+ApHe and ApPb may share an `apatite` group, while ZHe may use `zircon` and a
+poorly resolved Hbl profile may use `hornblende,false`. Other groupings and
+chronometers work without editing the source code.
 
-For an initial Gallagher-NNLS pilot, set these values in the script and keep
-bootstrap disabled until the convergence history has been inspected:
+For an initial iterative run, keep bootstrap disabled until the convergence
+history has been inspected:
 
 ```matlab
-tsf_mode                    = "gallagher_nnls";
+tsf_mode                    = "fixed"; % config TSFMode can override this
 tsf_update_fraction         = 0.4;
 tsf_smooth_span             = 3;
 tsf_nnls_max_outer          = 10;
@@ -191,26 +191,15 @@ tsf_nnls_no_improve_patience = 3;
 do_bootstrap                = false;
 ```
 
-Because the NNLS density objective is not identical to the grain likelihood,
+Because the source-weight density objective is not identical to the grain likelihood,
 the solver retains the lowest-NLL iteration and stops after the configured
 number of consecutive likelihood deteriorations. The selected iteration is
-identified in `tsf_nnls_convergence.csv`.
+identified in `source_weighting_convergence.csv`.
 
-For the mineral-grouped sensitivity test, change only:
-
-```matlab
-tsf_mode = "gallagher_grouped";
-```
-
-The default grouping is ApHe+ApPb = `apatite`, ZHe = `zircon`, and Hbl =
-`hornblende_fixed`. This is an effective dated-mineral sourcing sensitivity,
-not proof that erosion itself differs among mineral systems.
-
-After the unbootstrapped grouped run has been checked for convergence, use a
-small uncertainty pilot before a final run:
+After the unbootstrapped iterative run has been checked for convergence, use
+a small uncertainty pilot before a final run:
 
 ```matlab
-tsf_mode                   = "gallagher_grouped";
 tsf_nnls_max_outer         = 40;  % main-data solution
 tsf_nnls_boot_max_outer    = 20;  % cap within each resample
 do_bootstrap               = true;
@@ -218,9 +207,9 @@ n_boot                     = 20;
 ```
 
 Every resample first obtains its own fixed-hypsometry fit and then performs a
-guarded grouped TSF inversion. This is intentionally more expensive than the
-fixed or light bootstrap. Inspect `bootstrap_tsf_convergence_summary.csv`
-before increasing `n_boot`.
+guarded iterative source-weight inversion. This is intentionally more
+expensive than a fixed bootstrap. Inspect
+`source_weighting_bootstrap_summary.csv` before increasing `n_boot`.
 
 #### Config column descriptions
 
@@ -231,6 +220,8 @@ before increasing `n_boot`.
 | `Lambda` | Curvature smoothness regularization weight. Use 0.0 for AHe/ZHe; 0.5 for ApPb; 1.0–2.0 for HblAr |
 | `AgeMinFilter` | Exclude grains younger than this (Ma). Use 0 for none |
 | `AgeMaxFilter` | Exclude grains older than this (Ma). Use Inf for none |
+| `TSFGroup` | User-defined source-weight group; required on chronometer rows in iterative mode |
+| `EstimateTSF` | `true` estimates the group; `false` keeps it fixed to measured hypsometry |
 
 Filters should be applied with geological justification only (e.g., to exclude grains from older magmatic sources). All filtering decisions should be documented in your methods.
 
@@ -259,12 +250,10 @@ Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for
 |------|-------------|
 | `predicted_bedrock_transect_<Chron>.csv` | Best-fit A(z): elevation, hypsometric weight, predicted age per bin |
 | `predicted_bedrock_transect_<Chron>_CI.csv` | Same plus bootstrap median, 16th/84th percentile CI, ±1σ columns |
-| `tsf_weights_shared.csv` | Hypsometric weights, raw posterior and NNLS updates, selected model TSF, relative yield, and cumulative distributions |
-| `tsf_weights_grouped.csv` | Long-format grouped TSFs with group membership, raw updates, relative yield, and cumulative distributions |
-| `tsf_nnls_convergence.csv` | Gallagher-NNLS outer-iteration history: NLL, weight change, TSF distance from hypsometry, and NNLS fit SSE |
-| `tsf_weights_bootstrap_CI.csv` | Light-mode TSF median and 16th/84th percentiles after re-estimating the TSF in each resample |
-| `tsf_weights_grouped_bootstrap_CI.csv` | Group-specific best-fit TSFs and bootstrap median/16th/84th percentiles |
-| `bootstrap_tsf_convergence_summary.csv` | Per-resample grouped inversion success, NLL change, selected iteration, and stopping reason |
+| `source_weighting.csv` | Hypsometric and selected source weights, group membership, raw updates, relative yield, and cumulative distributions |
+| `source_weighting_convergence.csv` | Iterative-mode history: NLL, weight change, distance from hypsometry, and source-weight fit SSE |
+| `source_weighting_bootstrap_CI.csv` | Group-specific best-fit source weights and bootstrap median/16th/84th percentiles |
+| `source_weighting_bootstrap_summary.csv` | Per-resample iterative inversion success, NLL change, selected iteration, and stopping reason |
 | `grain_expected_source_<Chron>.csv` | Per-grain posterior source elevation (mean, median, P05–P95, SD) |
 | `grain_posteriors_<Chron>.csv` | Full posterior matrix P(z\|age) — one column per grain, one row per elevation bin |
 | `summary_fit_params.csv` | One row per chronometer: grain count, NLL, τ, A_min, A_max, all settings |
@@ -293,12 +282,11 @@ Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for
 
 **Ordering penalty diagnostics:** Check `ordering_penalty_contributions.csv` after each run. Large residual penalties after the joint fit indicate the data are in genuine conflict with the expected Tc ordering — this is a geologically interesting result that warrants investigation.
 
-**Flexible TSF diagnostics:** `RelativeYieldVsHypsometry = 1` means the selected
-TSF matches area-proportional sourcing in that bin. Values above or below 1
-indicate relative over- or under-representation. Light-mode bootstrap runs
-re-estimate the conservative TSF separately within every grain resample.
-Grouped Gallagher bootstrap runs likewise re-estimate the apatite and zircon
-TSFs in every resample; the shared `gallagher_nnls` bootstrap remains disabled.
+**Iterative source-weight diagnostics:** `RelativeYieldVsHypsometry = 1` means
+the selected effective source weight matches area-proportional sourcing in
+that bin. Values above or below 1 indicate relative over- or
+under-representation. Iterative bootstrap runs re-estimate every group marked
+`EstimateTSF=true` within each grain resample.
 
 ---
 
@@ -319,11 +307,12 @@ TSFs in every resample; the shared `gallagher_nnls` bootstrap remains disabled.
 
 ## Key assumptions and limitations
 
-- **Hypsometric TSF**: In fixed mode, sediment production, mineral fertility,
-  and transport efficiency are assumed uniform per unit catchment area. Light
-  mode relaxes this only as a conservative sensitivity test. The experimental
-  Gallagher-NNLS mode estimates a regularized shared TSF but is not a complete
-  reproduction of QTQt's transdimensional thermal-history inversion.
+- **Hypsometric source weighting**: In fixed mode, sediment production,
+  mineral fertility, preservation, and transport efficiency are assumed
+  uniform per unit catchment area. Iterative mode estimates regularized
+  effective source weights by elevation. It does not change the measured
+  hypsometry and is not a reproduction of QTQt's transdimensional
+  thermal-history inversion.
 - **Monotonicity**: A(z) is constrained non-decreasing with elevation. It may
   be nonlinear and does not require a constant exhumation rate through time,
   but it may be inappropriate in structurally complex catchments.

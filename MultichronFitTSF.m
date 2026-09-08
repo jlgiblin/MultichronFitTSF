@@ -19,7 +19,7 @@
 %
 % USAGE
 %   1. Set catchment_name and base_dir below (the only two lines you edit).
-%   2. Optionally override ordering or experimental TSF settings in config.
+%   2. Choose fixed or iterative source weighting in the config file.
 %   3. Run. All outputs are written into the catchment subfolder.
 %
 % FOLDER STRUCTURE  (unchanged from v4)
@@ -42,17 +42,21 @@
 %   place in the Hypsometry row under these column names):
 %     w_order     : ordering penalty weight  (default: see ORDERING PENALTY below)
 %     delta_min   : min age separation scale (default: see ORDERING PENALTY below)
-%     TSFMode     : fixed, light, gallagher_nnls, or gallagher_grouped
-%     TSFUpdateFraction : light-mode update fraction [0,1] (default 0.4)
-%     TSFSmoothSpan     : light-mode smoothing span in bins (default 3)
+%     TSFMode     : fixed or iterative
+%     TSFUpdateFraction : iterative relaxation step [0,1] (default 0.4)
+%     TSFSmoothSpan     : iterative smoothing span in bins (default 3)
+%   Optional columns on each chronometer row (required for iterative mode):
+%     TSFGroup    : chronometers with the same label share source weights
+%     EstimateTSF : true estimates that group's weights; false keeps the
+%                   group fixed to the measured hypsometry
 %
 %   Example:
-%     Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter
-%     Hypsometry,WP_Hypso.csv,,,,,
-%     ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf
-%     ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf
-%     ApPb,WP_ApPb.csv,0.1,15,0.5,0,Inf
-%     Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf
+%     Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFGroup,EstimateTSF
+%     Hypsometry,WP_Hypso.csv,,,,,,iterative,,
+%     ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,,apatite,true
+%     ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,,zircon,true
+%     ApPb,WP_ApPb.csv,0.1,15,0.5,0,Inf,,apatite,true
+%     Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,,hornblende,false
 %
 % CLOSURE TEMPERATURES (Tc)
 %   Hardcoded defaults from Hodges (2014) Table 2.
@@ -71,10 +75,10 @@
 % OUTPUTS  (written to catchment subfolder)
 %   predicted_bedrock_transect_<Chron>.csv          (selected + fixed comparison)
 %   predicted_bedrock_transect_<Chron>_CI.csv       (bootstrap CI)
-%   tsf_weights_shared.csv                          (TSF sensitivity output)
-%   tsf_weights_grouped.csv                         (grouped TSF output)
-%   tsf_weights_grouped_bootstrap_CI.csv            (grouped TSF bootstrap CI)
-%   bootstrap_tsf_convergence_summary.csv           (grouped bootstrap diagnostics)
+%   source_weighting.csv                            (fixed/iterative weights)
+%   source_weighting_convergence.csv                (iterative diagnostics)
+%   source_weighting_bootstrap_CI.csv               (iterative uncertainty)
+%   source_weighting_bootstrap_summary.csv          (bootstrap diagnostics)
 %   grain_posteriors_<Chron>.csv                    (optional)
 %   grain_expected_source_<Chron>.csv
 %   ordering_violations.csv                         (NEW: pre-fit violations)
@@ -145,36 +149,26 @@ delta_min_Ma = 1.0;
 %% ---------------------------------------------------
 
 
-%% ---- TOPOGRAPHIC SAMPLING FUNCTION (TSF) MODE  <-- experimental ----
+%% ---- SOURCE-WEIGHTING MODE ----
 %
 % tsf_mode = "fixed"
-%   Current/reference method. Hypsometric source weights remain fixed.
+%   The measured hypsometry supplies the source weights throughout the fit.
 %
-% tsf_mode = "light"
-%   Sensitivity test inspired by Gallagher & Parra (2020):
-%     1. fit A(z) and tau with the hypsometric TSF;
-%     2. pool grain posterior source probabilities across chronometers;
-%     3. smooth and shrink that one-step weight update toward hypsometry;
-%     4. refit A(z) and tau once using the revised shared TSF.
-%
-% tsf_mode = "gallagher_nnls"
-%   Experimental analogue of Gallagher & Parra (2020):
+% tsf_mode = "iterative"
+%   Flexible source-weighting analogue inspired by Gallagher & Parra (2020):
 %     1. predict a detrital age density for every elevation bin;
 %     2. estimate nonnegative, sum-to-one TSF weights by least squares;
 %     3. regularize the TSF toward hypsometry and a smooth elevation curve;
 %     4. refit A(z)/tau and repeat until the TSF and NLL stabilize.
-%   This profiles an optimal TSF within the existing A(z) inversion; it does
-%   not reproduce QTQt's transdimensional thermal-history McMC.
-%
-% tsf_mode = "gallagher_grouped"
-%   Same guarded NNLS iteration, but with mineral-informed TSF groups:
-%     ApHe + ApPb share an apatite TSF; ZHe has a zircon TSF; Hbl remains
-%     fixed to hypsometry because a flat Hbl A(z) cannot identify a TSF.
+%   TSFGroup and EstimateTSF in the config file control which chronometers
+%   share weights and which groups remain fixed. This estimates effective
+%   source contribution by elevation; it does not alter measured hypsometry
+%   or reproduce QTQt's thermal-history inversion.
 %
 % tsf_update_fraction controls the departure from hypsometry:
 %   0 = fixed hypsometry; 1 = full one-step posterior weight update.
 % A value of 0.4 is deliberately conservative for sensitivity testing.
-% In Gallagher NNLS modes it is the relaxation step from the current TSF
+% In iterative mode it is the relaxation step from the current weights
 % toward the newly estimated regularized NNLS target.
 %
 % tsf_smooth_span is a moving-mean span in equal-area bin index. Use 1 to
@@ -183,12 +177,11 @@ delta_min_Ma = 1.0;
 %tsf_smooth_span orginal=3
 %tsf_update_fraction=0.4
 %
-%tsf_mode            = "light", ""fixed";
-tsf_mode            = "gallagher_grouped";
+tsf_mode            = "fixed";
 tsf_update_fraction = 0.4;
 tsf_smooth_span     = 3;
 
-% Gallagher-style NNLS pilot settings. These are ignored in fixed/light.
+% Iterative NNLS settings. These are ignored in fixed mode.
 tsf_nnls_max_outer       = 40;
 tsf_nnls_weight_tol      = 1e-4;
 tsf_nnls_nll_tol         = 1e-3;
@@ -203,8 +196,8 @@ tsf_nnls_boot_max_outer  = 20;  % per-resample cap (limits bootstrap cost)
 age_grid_step          = 0.25;   % PDF plot resolution (Ma)
 write_grain_posteriors = true;   % set false to skip large grain posterior CSVs
 show_optimizer_iters   = false;  % show fminunc iterations in console
-do_bootstrap           = true;
-n_boot                 = 20;    % bootstrap resamples (500 for final runs)
+do_bootstrap           = false;  % enable after checking the primary fit
+n_boot                 = 20;     % pilot resamples (500 for final runs)
 ci_lo                  = 0.16;   % 68% CI lower bound
 ci_hi                  = 0.84;   % 68% CI upper bound
 target_bins            = 20;     % equal-area hypsometry bins ([] = use raw)
@@ -279,9 +272,15 @@ if any(strcmpi(cfg.Properties.VariableNames, 'TSFSmoothSpan'))
     end
 end
 
-if ~any(tsf_mode == ["fixed", "light", "gallagher_nnls", "gallagher_grouped"])
-    error("TSFMode must be 'fixed', 'light', 'gallagher_nnls', or 'gallagher_grouped'; received '%s'.", ...
+if tsf_mode == "gallagher_grouped"
+    warning("TSFMode='gallagher_grouped' is deprecated; using 'iterative'.");
+    tsf_mode = "iterative";
+elseif any(tsf_mode == ["light", "gallagher_nnls"])
+    error("TSFMode='%s' was a prototype option. Use 'fixed' or 'iterative'.", ...
         tsf_mode);
+end
+if ~any(tsf_mode == ["fixed", "iterative"])
+    error("TSFMode must be 'fixed' or 'iterative'; received '%s'.", tsf_mode);
 end
 if ~isscalar(tsf_update_fraction) || ~isfinite(tsf_update_fraction) || ...
         tsf_update_fraction < 0 || tsf_update_fraction > 1
@@ -312,31 +311,36 @@ if any(~isfinite([tsf_nnls_weight_tol, tsf_nnls_nll_tol, ...
              tsf_nnls_hypsometry_pull, tsf_nnls_smoothness] < 0)
     error("Gallagher-NNLS tolerances and regularization settings must be finite and nonnegative.");
 end
-if tsf_mode == "gallagher_nnls" && do_bootstrap
-    error("Shared Gallagher-NNLS bootstrap is not enabled. Use gallagher_grouped, light, or fixed mode.");
-end
-
 hypsometry_file = fullfile(catchment_dir, cfg.File(hyps_mask));
 chron_cfg       = cfg(chron_mask, :);
 n_chron         = height(chron_cfg);
+
+if tsf_mode == "iterative"
+    if ~any(strcmpi(cfg.Properties.VariableNames, 'TSFGroup')) || ...
+            ~any(strcmpi(cfg.Properties.VariableNames, 'EstimateTSF'))
+        error("Iterative mode requires TSFGroup and EstimateTSF columns " + ...
+              "on every chronometer row in the config file.");
+    end
+    group_labels = strtrim(string(chron_cfg.TSFGroup));
+    if any(ismissing(group_labels) | strlength(group_labels) == 0)
+        error("Every chronometer row requires a non-empty TSFGroup in iterative mode.");
+    end
+end
 
 fprintf("Hypsometry file : %s\n", hypsometry_file);
 fprintf("Chronometers    : %s\n", strjoin(chron_cfg.Chronometer, ', '));
 fprintf("w_order         : %.2f\n", w_order);
 fprintf("delta_min_Ma    : %.2f\n", delta_min_Ma);
 fprintf("TSF mode        : %s\n", tsf_mode);
-if tsf_mode == "light"
-    fprintf("TSF update      : fraction=%.2f  smooth span=%d bins\n", ...
-        tsf_update_fraction, tsf_smooth_span);
-elseif any(tsf_mode == ["gallagher_nnls", "gallagher_grouped"])
+if tsf_mode == "iterative"
     fprintf("TSF NNLS update : relaxation=%.2f  smooth span=%d bins\n", ...
         tsf_update_fraction, tsf_smooth_span);
     fprintf("TSF NNLS reg.   : hypsometry=%.3g  smoothness=%.3g  max outer=%d\n", ...
         tsf_nnls_hypsometry_pull, tsf_nnls_smoothness, tsf_nnls_max_outer);
     fprintf("TSF NNLS guard  : stop after %d consecutive non-improving iterations\n", ...
         tsf_nnls_no_improve_patience);
-    if do_bootstrap && tsf_mode == "gallagher_grouped"
-        fprintf("TSF bootstrap   : re-estimate grouped TSFs, max outer=%d per resample\n", ...
+    if do_bootstrap
+        fprintf("TSF bootstrap   : re-estimate source weights, max outer=%d per resample\n", ...
             tsf_nnls_boot_max_outer);
     end
 end
@@ -502,6 +506,14 @@ for c = 1:n_chron
     chron_data(c).age_max_filt = chron_cfg.AgeMaxFilter(c);
     if isnan(chron_data(c).age_max_filt) || isinf(chron_data(c).age_max_filt)
         chron_data(c).age_max_filt = Inf;
+    end
+    if tsf_mode == "iterative"
+        chron_data(c).tsf_group = strtrim(string(chron_cfg.TSFGroup(c)));
+        chron_data(c).estimate_tsf = parse_config_logical( ...
+            chron_cfg.EstimateTSF(c), "EstimateTSF", chron);
+    else
+        chron_data(c).tsf_group = "fixed_hypsometry";
+        chron_data(c).estimate_tsf = false;
     end
     chron_data(c).ok = false;
 
@@ -674,8 +686,8 @@ joint_obj = @(th) nll_joint(th, chron_data, ok_idx, pz, Nz, ...
 
 fprintf("Fixed-hypsometry joint fit complete.  Total NLL = %.4f\n\n", nll_total);
 
-% Preserve the reference solution even when the light TSF sensitivity mode
-% is enabled. Downstream comparison outputs always include this solution.
+% Preserve the fixed-hypsometry reference solution. Iterative-mode outputs
+% retain it for direct comparison with the selected source-weight solution.
 theta_fixed_hat = theta_joint_hat;
 nll_fixed       = nll_total;
 [Ahat_all, tauhat_all] = unpack_joint(theta_joint_hat, chron_data, ok_idx, Nz);
@@ -684,70 +696,34 @@ tauhat_fixed = tauhat_all;
 
 
 %% ---------------- OPTIONAL TSF REWEIGHTING ----------------
-% The raw update is one pooled EM-style mixture-weight update calculated
-% from grain posterior responsibilities under the fixed-hypsometry fit.
-% In light mode it is smoothed, conservatively shrunk toward hypsometry,
-% and used for one warm-started refit. Gallagher-NNLS mode instead alternates
-% a regularized nonnegative least-squares TSF update with A(z)/tau refits.
+% The raw update is retained as a diagnostic. Iterative mode alternates a
+% regularized nonnegative least-squares source-weight update with A(z)/tau
+% refits. Fixed mode retains measured hypsometric weights throughout.
 
 [tsf_raw_update, n_tsf_grains] = posterior_tsf_update( ...
     Ahat_fixed, tauhat_fixed, chron_data, ok_idx, pz);
 
 tsf_weights = pz;
 tsf_nnls_raw = nan(Nz, 1);
-chron_tsf_group = repmat("shared", n_chron, 1);
+chron_tsf_group = repmat("fixed_hypsometry", n_chron, 1);
 TSFConvergence = table();
 
-if tsf_mode == "light"
-    tsf_target = tsf_raw_update;
-    if tsf_smooth_span > 1
-        tsf_target = smoothdata(tsf_target, 'movmean', tsf_smooth_span);
-    end
-    tsf_target  = max(tsf_target, 1e-8);
-    tsf_target  = tsf_target / sum(tsf_target);
-    tsf_weights = (1 - tsf_update_fraction) * pz + ...
-                  tsf_update_fraction * tsf_target;
-    tsf_weights = max(tsf_weights, 1e-8);
-    tsf_weights = tsf_weights / sum(tsf_weights);
+if tsf_mode == "iterative"
+    fprintf("Phase 2b: iterative source-weight inversion...\n");
 
-    fprintf("Phase 2b: one-step shared TSF sensitivity refit...\n");
-    light_obj = @(th) nll_joint(th, chron_data, ok_idx, tsf_weights, Nz, ...
-                                 pair_lo, pair_hi, pair_gap, ...
-                                 w_order, delta_min_Ma);
-    [theta_joint_hat, nll_total] = fminunc( ...
-        light_obj, theta_fixed_hat, opts_joint);
-    [Ahat_all, tauhat_all] = unpack_joint( ...
-        theta_joint_hat, chron_data, ok_idx, Nz);
-
-    fprintf("Light-TSF refit complete. Total NLL = %.4f (change = %+.4f)\n", ...
-        nll_total, nll_total - nll_fixed);
-    fprintf("  TSF total-variation distance from hypsometry = %.4f\n\n", ...
-        0.5 * sum(abs(tsf_weights - pz)));
-
-elseif any(tsf_mode == ["gallagher_nnls", "gallagher_grouped"])
-    fprintf("Phase 2b: regularized Gallagher-style NNLS TSF inversion...\n");
-
-    if tsf_mode == "gallagher_grouped"
-        [tsf_group_names, tsf_group_indices, tsf_group_fixed, ...
-            chron_tsf_group] = build_mineral_tsf_groups(chron_data, ok_idx);
-        weights_current = repmat(pz, 1, n_chron);
-        raw_current = repmat(pz, 1, n_chron);
-        fprintf("  TSF groups:\n");
-        for g = 1:numel(tsf_group_names)
-            members = tsf_group_indices{g};
-            member_names = string(arrayfun(@(c) chron_data(c).chron, ...
-                members, 'UniformOutput', false));
-            fprintf("    %-18s : %s", tsf_group_names(g), ...
-                strjoin(member_names, ', '));
-            if tsf_group_fixed(g); fprintf(" (fixed to hypsometry)"); end
-            fprintf("\n");
-        end
-    else
-        tsf_group_names   = "shared";
-        tsf_group_indices = {ok_idx};
-        tsf_group_fixed   = false;
-        weights_current   = repmat(pz, 1, n_chron);
-        raw_current       = nan(Nz, n_chron);
+    [tsf_group_names, tsf_group_indices, tsf_group_fixed, ...
+        chron_tsf_group] = build_configured_tsf_groups(chron_data, ok_idx);
+    weights_current = repmat(pz, 1, n_chron);
+    raw_current = repmat(pz, 1, n_chron);
+    fprintf("  Source-weight groups:\n");
+    for g = 1:numel(tsf_group_names)
+        members = tsf_group_indices{g};
+        member_names = string(arrayfun(@(c) chron_data(c).chron, ...
+            members, 'UniformOutput', false));
+        fprintf("    %-18s : %s", tsf_group_names(g), ...
+            strjoin(member_names, ', '));
+        if tsf_group_fixed(g); fprintf(" (fixed to hypsometry)"); end
+        fprintf("\n");
     end
 
     theta_current = theta_fixed_hat;
@@ -875,13 +851,8 @@ elseif any(tsf_mode == ["gallagher_nnls", "gallagher_grouped"])
 
     n_outer = find(~isnan(hist_iter), 1, 'last');
     theta_joint_hat = best_theta;
-    if tsf_mode == "gallagher_grouped"
-        tsf_weights  = best_weights;
-        tsf_nnls_raw = best_nnls_raw;
-    else
-        tsf_weights  = best_weights(:,ok_idx(1));
-        tsf_nnls_raw = best_nnls_raw(:,ok_idx(1));
-    end
+    tsf_weights  = best_weights;
+    tsf_nnls_raw = best_nnls_raw;
     nll_total       = best_nll;
     [Ahat_all, tauhat_all] = unpack_joint( ...
         theta_joint_hat, chron_data, ok_idx, Nz);
@@ -906,23 +877,18 @@ elseif any(tsf_mode == ["gallagher_nnls", "gallagher_grouped"])
     end
     TSFConvergence.TerminationReason = repmat(termination_reason, n_outer, 1);
 
-    conv_file = fullfile(catchment_dir, "tsf_nnls_convergence.csv");
+    conv_file = fullfile(catchment_dir, "source_weighting_convergence.csv");
     writetable(TSFConvergence, conv_file);
-    fprintf("Gallagher-NNLS fit complete after %d evaluated outer iterations.\n", n_outer);
+    fprintf("Iterative source-weight fit complete after %d evaluated outer iterations.\n", n_outer);
     fprintf("  Selected iteration=%d  termination=%s\n", ...
         best_iteration, termination_reason);
     fprintf("  Total NLL=%.4f (change from fixed=%+.4f)\n", ...
         nll_total, nll_total - nll_fixed);
-    if tsf_mode == "gallagher_grouped"
-        for g = 1:numel(tsf_group_names)
-            member0 = tsf_group_indices{g}(1);
-            group_tv = 0.5 * sum(abs(tsf_weights(:,member0) - pz));
-            fprintf("  TSF group %-18s TV from hypsometry=%.4f\n", ...
-                tsf_group_names(g), group_tv);
-        end
-    else
-        fprintf("  TSF total-variation distance from hypsometry=%.4f\n", ...
-            0.5 * sum(abs(tsf_weights - pz)));
+    for g = 1:numel(tsf_group_names)
+        member0 = tsf_group_indices{g}(1);
+        group_tv = 0.5 * sum(abs(tsf_weights(:,member0) - pz));
+        fprintf("  Source-weight group %-18s TV from hypsometry=%.4f\n", ...
+            tsf_group_names(g), group_tv);
     end
     fprintf("  Wrote %s\n\n", conv_file);
 else
@@ -930,7 +896,7 @@ else
             "for diagnostics only.\n\n");
 end
 
-if tsf_mode == "gallagher_grouped"
+if tsf_mode == "iterative"
     TSFTable = table();
     for g = 1:numel(tsf_group_names)
         members = tsf_group_indices{g};
@@ -953,7 +919,7 @@ if tsf_mode == "gallagher_grouped"
                               'HypsometryCDF','ModelTSFCDF','GroupGrainCount'});
         TSFTable = [TSFTable; row_group]; %#ok<AGROW>
     end
-    tsf_file = fullfile(catchment_dir, "tsf_weights_grouped.csv");
+    tsf_file = fullfile(catchment_dir, "source_weighting.csv");
 else
     tsf_relative_yield = tsf_weights ./ max(pz, realmin);
     TSFTable = table(z_centers, pz, tsf_raw_update, tsf_nnls_raw, tsf_weights, ...
@@ -962,7 +928,7 @@ else
                           'RawPosteriorWeightUpdate','RawNNLSWeightUpdate', ...
                           'ModelTSFWeight', ...
                           'RelativeYieldVsHypsometry','HypsometryCDF','ModelTSFCDF'});
-    tsf_file = fullfile(catchment_dir, "tsf_weights_shared.csv");
+    tsf_file = fullfile(catchment_dir, "source_weighting.csv");
 end
 
 TSFTable.TSFMode = repmat(tsf_mode, height(TSFTable), 1);
@@ -979,9 +945,9 @@ fprintf("Wrote %s\n\n", tsf_file);
 
 outFigDir = fullfile(catchment_dir, "figures_svg");
 if ~exist(outFigDir, "dir"); mkdir(outFigDir); end
-fig_tsf = figure('Name', 'TSF_Weights');
+fig_tsf = figure('Name', 'Source_Weights');
 subplot(1,2,1); hold on; box on;
-if tsf_mode == "gallagher_grouped"
+if tsf_mode == "iterative"
     for g = 1:numel(tsf_group_names)
         member0 = tsf_group_indices{g}(1);
         plot(tsf_weights(:,member0) ./ max(pz, realmin), z_centers, ...
@@ -992,14 +958,14 @@ else
         'o-', 'LineWidth', 1.5, 'DisplayName', 'shared');
 end
 xline(1, '--k', 'DisplayName', 'hypsometry');
-xlabel('Relative yield (model TSF / hypsometry)');
+xlabel('Relative source weight (model / hypsometry)');
 ylabel('Elevation (m)');
-title(sprintf('TSF weights (%s)', tsf_mode));
+title(sprintf('Source weights (%s)', tsf_mode));
 legend('Location', 'best');
 subplot(1,2,2); hold on; box on;
 stairs(cumsum(pz), z_edges(2:end), 'LineWidth', 1.5, ...
     'DisplayName', 'hypsometry');
-if tsf_mode == "gallagher_grouped"
+if tsf_mode == "iterative"
     for g = 1:numel(tsf_group_names)
         member0 = tsf_group_indices{g}(1);
         stairs(cumsum(tsf_weights(:,member0)), z_edges(2:end), ...
@@ -1012,7 +978,7 @@ end
 xlabel('Cumulative probability'); ylabel('Elevation (m)');
 legend('Location', 'best');
 title('Cumulative source weighting');
-tsf_fig_file = fullfile(outFigDir, "TSF_Weights.svg");
+tsf_fig_file = fullfile(outFigDir, "Source_Weights.svg");
 try
     exportgraphics(fig_tsf, tsf_fig_file, 'ContentType', 'vector');
 catch
@@ -1063,11 +1029,9 @@ boot_tsf_termination  = strings(n_boot, 1);
 if do_bootstrap
     fprintf("Phase 3: joint bootstrap (%d resamples)...\n", n_boot);
     fprintf("  (Each resample is a full joint fminunc solve -- may take a few minutes)\n");
-    if tsf_mode == "light"
-        fprintf("  Light TSF is recalculated separately in every resample.\n");
-    elseif tsf_mode == "gallagher_grouped"
-        fprintf("  Apatite and zircon TSFs are re-estimated in every resample.\n");
-        fprintf("  Grouped TSF iterations are capped at %d per resample.\n", ...
+    if tsf_mode == "iterative"
+        fprintf("  Configured source-weight groups are re-estimated in every resample.\n");
+        fprintf("  Iterative weight updates are capped at %d per resample.\n", ...
             tsf_nnls_boot_max_outer);
     end
 
@@ -1099,39 +1063,8 @@ if do_bootstrap
             [th_fixed_b, nll_fixed_b] = fminunc( ...
                 obj_fixed_b, theta_fixed_hat, opts_boot);
 
-            if tsf_mode == "light"
-                % Step 2: calculate a new TSF from this bootstrap sample
-                [A_fixed_b, tau_fixed_b] = unpack_joint( ...
-                    th_fixed_b, cd_boot, ok_idx, Nz);
-
-                [tsf_raw_b, ~] = posterior_tsf_update( ...
-                    A_fixed_b, tau_fixed_b, cd_boot, ok_idx, pz);
-
-                % Smooth and shrink toward hypsometry
-                tsf_target_b = tsf_raw_b;
-
-                if tsf_smooth_span > 1
-                    tsf_target_b = smoothdata( ...
-                        tsf_target_b, 'movmean', tsf_smooth_span);
-                end
-
-                tsf_target_b = max(tsf_target_b, 1e-8);
-                tsf_target_b = tsf_target_b / sum(tsf_target_b);
-
-                tsf_b = (1 - tsf_update_fraction) * pz + ...
-                         tsf_update_fraction * tsf_target_b;
-
-                tsf_b = max(tsf_b, 1e-8);
-                tsf_b = tsf_b / sum(tsf_b);
-
-                % Step 3: refit this bootstrap sample with its own TSF
-                obj_light_b = @(th) nll_joint(th, cd_boot, ok_idx, tsf_b, Nz, ...
-                                              pair_lo, pair_hi, pair_gap, ...
-                                              w_order, delta_min_Ma);
-
-                th_b = fminunc(obj_light_b, th_fixed_b, opts_boot);
-            elseif tsf_mode == "gallagher_grouped"
-                % Re-estimate mineral-specific effective source weights in
+            if tsf_mode == "iterative"
+                % Re-estimate configured effective source weights in
                 % this resample. The fixed-hypsometry bootstrap solution is
                 % the reference state and the likelihood guard retains the
                 % best alternating NNLS/A(z) iteration.
@@ -1160,7 +1093,7 @@ if do_bootstrap
 
             Ab_all(:,:,b)      = Ab;
             taub_all(:,b)      = taub;
-            if tsf_mode == "gallagher_grouped"
+            if tsf_mode == "iterative"
                 tsf_boot_grouped(:,:,b) = tsf_b;
             else
                 tsf_boot_all(:,b) = tsf_b;
@@ -1178,7 +1111,7 @@ if do_bootstrap
     fprintf("  Bootstrap complete: %d / %d successful resamples.\n\n", ...
         n_boot_success, n_boot);
 
-    if tsf_mode == "gallagher_grouped"
+    if tsf_mode == "iterative"
         boot_success = valid_boot(:);
         BootTSFConvergence = table( ...
             (1:n_boot)', boot_success, boot_tsf_fixed_nll, ...
@@ -1186,44 +1119,17 @@ if do_bootstrap
             boot_tsf_selected_nll - boot_tsf_fixed_nll, ...
             boot_tsf_best_iter, boot_tsf_eval_iters, boot_tsf_termination, ...
             'VariableNames', {'BootstrapReplicate','Successful', ...
-                'FixedHypsometryNLL','SelectedGroupedNLL', ...
+                'FixedHypsometryNLL','SelectedIterativeNLL', ...
                 'NLLChangeFromFixed','BestIteration', ...
                 'EvaluatedIterations','TerminationReason'});
         boot_conv_file = fullfile( ...
-            catchment_dir, "bootstrap_tsf_convergence_summary.csv");
+            catchment_dir, "source_weighting_bootstrap_summary.csv");
         writetable(BootTSFConvergence, boot_conv_file);
         fprintf("Wrote %s\n\n", boot_conv_file);
     end
 end
 
-    if tsf_mode == "light"
-    valid_tsf = tsf_boot_all(:, ~any(isnan(tsf_boot_all), 1));
-
-    if ~isempty(valid_tsf)
-        tsf_boot_median = median(valid_tsf, 2, 'omitnan');
-        tsf_boot_lo     = quantile(valid_tsf, ci_lo, 2);
-        tsf_boot_hi     = quantile(valid_tsf, ci_hi, 2);
-
-        TSFBootTable = table( ...
-            z_centers, pz, tsf_weights, ...
-            tsf_boot_median, tsf_boot_lo, tsf_boot_hi, ...
-            'VariableNames', { ...
-                'Elevation_m', ...
-                'HypsometryWeight', ...
-                'BestFitTSFWeight', ...
-                'TSF_boot_median', ...
-                'TSF_boot_p16', ...
-                'TSF_boot_p84'});
-
-        tsf_boot_file = fullfile( ...
-            catchment_dir, "tsf_weights_bootstrap_CI.csv");
-
-        writetable(TSFBootTable, tsf_boot_file);
-        fprintf("Wrote %s\n\n", tsf_boot_file);
-    end
-end
-
-if do_bootstrap && tsf_mode == "gallagher_grouped"
+if do_bootstrap && tsf_mode == "iterative"
     TSFGroupBootTable = table();
     for g = 1:numel(tsf_group_names)
         member0 = tsf_group_indices{g}(1);
@@ -1253,7 +1159,7 @@ if do_bootstrap && tsf_mode == "gallagher_grouped"
 
     if ~isempty(TSFGroupBootTable)
         grouped_boot_file = fullfile( ...
-            catchment_dir, "tsf_weights_grouped_bootstrap_CI.csv");
+            catchment_dir, "source_weighting_bootstrap_CI.csv");
         writetable(TSFGroupBootTable, grouped_boot_file);
         fprintf("Wrote %s\n\n", grouped_boot_file);
     end
@@ -1643,59 +1549,70 @@ end
 
 
 function [group_names, group_indices, group_fixed, chron_group] = ...
-        build_mineral_tsf_groups(chron_data, ok_idx)
-% Default effective-TSF grouping for the currently supported systems.
-% ApHe and ApPb share apatite fertility/transport; ZHe is separate; Hbl is
-% held fixed because a flat high-temperature profile cannot constrain TSF.
+        build_configured_tsf_groups(chron_data, ok_idx)
+% Build effective source-weight groups from explicit config values. This
+% avoids assigning scientific meaning from a chronometer's display name.
 
     n_chron = numel(chron_data);
     chron_group = repmat("unassigned", n_chron, 1);
-    apatite = [];
-    zircon = [];
-    hbl_fixed = [];
-    other = [];
+    labels = strings(numel(ok_idx), 1);
+    keys = strings(numel(ok_idx), 1);
+    estimate = false(numel(ok_idx), 1);
 
-    for c = ok_idx
-        key = lower(regexprep(string(chron_data(c).chron), '[^a-zA-Z0-9]', ''));
-        if any(key == ["aphe", "ahe", "appb", "apb"]) || contains(key, "apatite")
-            apatite(end+1) = c; %#ok<AGROW>
-            chron_group(c) = "apatite";
-        elseif any(key == ["zhe", "zirconhe"]) || contains(key, "zircon")
-            zircon(end+1) = c; %#ok<AGROW>
-            chron_group(c) = "zircon";
-        elseif any(key == ["hbl", "hblar", "hornblende", "hornblendear"]) || ...
-                contains(key, "hornblende")
-            hbl_fixed(end+1) = c; %#ok<AGROW>
-            chron_group(c) = "hornblende_fixed";
-        else
-            other(end+1) = c; %#ok<AGROW>
-            chron_group(c) = "other_fixed";
+    for j = 1:numel(ok_idx)
+        c = ok_idx(j);
+        labels(j) = strtrim(string(chron_data(c).tsf_group));
+        keys(j) = lower(labels(j));
+        estimate(j) = chron_data(c).estimate_tsf;
+    end
+
+    [unique_keys, first_idx] = unique(keys, 'stable');
+    group_names = labels(first_idx);
+    group_indices = cell(numel(unique_keys), 1);
+    group_fixed = false(numel(unique_keys), 1);
+
+    for g = 1:numel(unique_keys)
+        in_group = keys == unique_keys(g);
+        member_positions = find(in_group);
+        members = ok_idx(member_positions);
+        flags = estimate(in_group);
+        if any(flags ~= flags(1))
+            error("All chronometers in TSFGroup '%s' must use the same EstimateTSF value.", ...
+                group_names(g));
+        end
+        group_indices{g} = members;
+        group_fixed(g) = ~flags(1);
+        chron_group(members) = group_names(g);
+    end
+end
+
+
+function value = parse_config_logical(raw_value, column_name, chronometer)
+% Parse true/false config values without depending on readtable's inferred
+% column type. Accepted forms: true/false, yes/no, 1/0.
+
+    if islogical(raw_value)
+        value = raw_value;
+        return;
+    end
+    if isnumeric(raw_value)
+        if isscalar(raw_value) && isfinite(raw_value) && any(raw_value == [0, 1])
+            value = logical(raw_value);
+            return;
         end
     end
 
-    group_names = strings(0,1);
-    group_indices = {};
-    group_fixed = false(0,1);
-    if ~isempty(apatite)
-        group_names(end+1,1) = "apatite";
-        group_indices{end+1,1} = apatite; %#ok<AGROW>
-        group_fixed(end+1,1) = false;
-    end
-    if ~isempty(zircon)
-        group_names(end+1,1) = "zircon";
-        group_indices{end+1,1} = zircon; %#ok<AGROW>
-        group_fixed(end+1,1) = false;
-    end
-    if ~isempty(hbl_fixed)
-        group_names(end+1,1) = "hornblende_fixed";
-        group_indices{end+1,1} = hbl_fixed; %#ok<AGROW>
-        group_fixed(end+1,1) = true;
-    end
-    for j = 1:numel(other)
-        c = other(j);
-        group_names(end+1,1) = "fixed_" + string(chron_data(c).chron);
-        group_indices{end+1,1} = c; %#ok<AGROW>
-        group_fixed(end+1,1) = true;
+    text_value = lower(strtrim(string(raw_value)));
+    if ismissing(text_value) || strlength(text_value) == 0
+        error("%s is required for chronometer '%s' in iterative mode.", ...
+            column_name, chronometer);
+    elseif any(text_value == ["true", "yes", "1"])
+        value = true;
+    elseif any(text_value == ["false", "no", "0"])
+        value = false;
+    else
+        error("%s for chronometer '%s' must be true/false, yes/no, or 1/0.", ...
+            column_name, chronometer);
     end
 end
 
@@ -1877,8 +1794,7 @@ end
 function density = gaussian_density(x, mu, sigma)
 % Normal probability density with implicit expansion. Callers arrange x,
 % mu, and sigma as row/column vectors to construct the required matrix.
-    scaled = (x - mu) ./ sigma;
-    density = exp(-0.5 * scaled.^2) ./ (sqrt(2*pi) .* sigma);
+    density = normpdf(x, mu, sigma);
 end
 
 
