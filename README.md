@@ -221,6 +221,11 @@ use_parallel_bootstrap     = true;
 parallel_worker_count      = 4;   % reduce this on memory-limited systems
 ```
 
+For a final analysis, `n_boot = 200` is a practical starting point. More
+resamples may be useful when interval bounds remain unstable, but they are not
+automatically more appropriate; report the value used and check that the
+resulting confidence intervals are sufficiently stable for the application.
+
 Every resample first obtains its own fixed-hypsometry fit and then performs a
 guarded iterative source-weight inversion. This is intentionally more
 expensive than a fixed bootstrap. Inspect
