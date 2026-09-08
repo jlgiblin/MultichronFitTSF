@@ -45,23 +45,26 @@
 %     TSFMode     : fixed or iterative
 %     TSFUpdateFraction : iterative relaxation step [0,1] (default 0.4)
 %     TSFSmoothSpan     : iterative smoothing span in bins (default 3)
-%   Optional columns on each chronometer row (required for iterative mode):
-%     TSFGroup    : chronometers with the same label share source weights
+%   Optional columns on each chronometer row:
+%     ClosureTemperature_C : user-defined nominal closure temperature used
+%                            only to construct ordering constraints
+%     TSFGroup    : matching labels share source weights in iterative mode;
+%                   blank means estimate this chronometer separately
 %     EstimateTSF : true estimates that group's weights; false keeps the
-%                   group fixed to the measured hypsometry
+%                   group fixed to hypsometry (blank defaults to true)
 %
 %   Example:
-%     Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFGroup,EstimateTSF
-%     Hypsometry,WP_Hypso.csv,,,,,,iterative,,
-%     ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,,apatite,true
-%     ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,,zircon,true
-%     ApPb,WP_ApPb.csv,0.1,15,0.5,0,Inf,,apatite,true
-%     Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,,hornblende,false
+%     Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,ClosureTemperature_C,TSFMode,TSFGroup,EstimateTSF
+%     Hypsometry,WP_Hypso.csv,,,,,,,iterative,,
+%     ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
+%     ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
+%     ApPb,WP_ApPb.csv,0.1,15,0.5,0,Inf,460,,apatite,true
+%     Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
 %
 % CLOSURE TEMPERATURES (Tc)
-%   Hardcoded defaults from Hodges (2014) Table 2.
-%   Edit the TC_DEFAULTS struct below to override for non-standard systems.
-%   Recognised name variants are listed in build_tc_lookup().
+%   Prefer an explicit ClosureTemperature_C value on each chronometer row.
+%   Recognized blank entries use built-in fallbacks from Hodges (2014).
+%   Unrecognized blank entries are fitted without an ordering constraint.
 %
 % ORDERING PENALTY
 %   For each pair (i,j) with Tc_i < Tc_j, at each elevation bin k:
@@ -117,10 +120,10 @@ base_dir       = "/Users/jacquelinegiblin/Documents/MATLAB/MultichronFitTSF"; % 
 %% ============================================================
 
 
-%% ---- CLOSURE TEMPERATURES  <-- edit here to override defaults ----
+%% ---- CLOSURE-TEMPERATURE FALLBACKS ----
 %
-% Values from Hodges (2014) Table 2, bulk closure temperature (Tcb).
-% Units: degrees Celsius.
+% Used only when ClosureTemperature_C is blank. Values from Hodges (2014)
+% Table 2, bulk closure temperature (Tcb), in degrees Celsius.
 %
 TC_DEFAULTS = struct( ...
     'ahe',  70, ...   % Apatite (U-Th)/He  -- van Soest et al. 2011; Farley 2000
@@ -315,18 +318,6 @@ hypsometry_file = fullfile(catchment_dir, cfg.File(hyps_mask));
 chron_cfg       = cfg(chron_mask, :);
 n_chron         = height(chron_cfg);
 
-if tsf_mode == "iterative"
-    if ~any(strcmpi(cfg.Properties.VariableNames, 'TSFGroup')) || ...
-            ~any(strcmpi(cfg.Properties.VariableNames, 'EstimateTSF'))
-        error("Iterative mode requires TSFGroup and EstimateTSF columns " + ...
-              "on every chronometer row in the config file.");
-    end
-    group_labels = strtrim(string(chron_cfg.TSFGroup));
-    if any(ismissing(group_labels) | strlength(group_labels) == 0)
-        error("Every chronometer row requires a non-empty TSFGroup in iterative mode.");
-    end
-end
-
 fprintf("Hypsometry file : %s\n", hypsometry_file);
 fprintf("Chronometers    : %s\n", strjoin(chron_cfg.Chronometer, ', '));
 fprintf("w_order         : %.2f\n", w_order);
@@ -423,11 +414,32 @@ fprintf("Hypsometry: %d equal-area bins  |  %.0f - %.0f m\n\n", ...
 tc_lookup = build_tc_lookup(TC_DEFAULTS);
 
 Tc_vec = nan(n_chron, 1);   % closure temperature for each chronometer
+Tc_source = repmat("not provided", n_chron, 1);
+tc_col = find(strcmpi(chron_cfg.Properties.VariableNames, ...
+    'ClosureTemperature_C'), 1);
 for c = 1:n_chron
+    if ~isempty(tc_col)
+        tc_config_text = strtrim(string(chron_cfg{c, tc_col}));
+        if ~ismissing(tc_config_text) && strlength(tc_config_text) > 0
+            tc_config_value = str2double(tc_config_text);
+            if ~isfinite(tc_config_value)
+                error("ClosureTemperature_C for chronometer '%s' must be a finite number or blank.", ...
+                    chron_cfg.Chronometer(c));
+            end
+            Tc_vec(c) = tc_config_value;
+            Tc_source(c) = "config";
+        end
+    end
+
+    if isfinite(Tc_vec(c))
+        continue;
+    end
+
     cname = lower(strtrim(char(chron_cfg.Chronometer(c))));
     for row = 1:size(tc_lookup, 1)
         if any(strcmpi(tc_lookup{row,1}, cname))
             Tc_vec(c) = tc_lookup{row,2};
+            Tc_source(c) = "built-in fallback";
             break;
         end
     end
@@ -443,7 +455,8 @@ has_tc = ~isnan(Tc_vec);
 fprintf("Tc assignments:\n");
 for c = 1:n_chron
     if has_tc(c)
-        fprintf("  %-12s  Tc = %d degC\n", chron_cfg.Chronometer(c), Tc_vec(c));
+        fprintf("  %-12s  Tc = %g degC (%s)\n", ...
+            chron_cfg.Chronometer(c), Tc_vec(c), Tc_source(c));
     else
         fprintf("  %-12s  Tc = unrecognised (no ordering constraint)\n", ...
             chron_cfg.Chronometer(c));
@@ -453,8 +466,12 @@ end
 % Build pairwise gap matrix: gap(i,j) = (Tc_j - Tc_i) / (Tc_max - Tc_min)
 % Only populated where i < j and Tc_i < Tc_j (lower-Tc must be younger).
 Tc_known  = Tc_vec(has_tc);
-Tc_range  = max(Tc_known) - min(Tc_known);
-if Tc_range == 0; Tc_range = 1; end  % guard single-chronometer edge case
+if numel(Tc_known) >= 2
+    Tc_range = max(Tc_known) - min(Tc_known);
+else
+    Tc_range = 1;
+end
+if Tc_range == 0; Tc_range = 1; end
 
 % Full index pairs (using original chronometer indices)
 chron_idx_with_tc = find(has_tc);
@@ -467,7 +484,9 @@ for ii = 1:numel(chron_idx_with_tc)
     for jj = ii+1:numel(chron_idx_with_tc)
         ci = chron_idx_with_tc(ii);
         cj = chron_idx_with_tc(jj);
-        if Tc_vec(ci) < Tc_vec(cj)
+        if Tc_vec(ci) == Tc_vec(cj)
+            continue;
+        elseif Tc_vec(ci) < Tc_vec(cj)
             lo = ci; hi = cj;
         else
             lo = cj; hi = ci;
@@ -481,7 +500,7 @@ end
 
 fprintf("\nOrdering pairs (%d total):\n", n_pairs);
 for p = 1:n_pairs
-    fprintf("  %s (Tc=%d) < %s (Tc=%d)  |  gap=%.3f  |  min_sep=%.3f Ma\n", ...
+    fprintf("  %s (Tc=%g) < %s (Tc=%g)  |  gap=%.3f  |  min_sep=%.3f Ma\n", ...
         chron_cfg.Chronometer(pair_lo(p)), Tc_vec(pair_lo(p)), ...
         chron_cfg.Chronometer(pair_hi(p)), Tc_vec(pair_hi(p)), ...
         pair_gap(p), delta_min_Ma * pair_gap(p));
@@ -493,6 +512,8 @@ fprintf("\n");
 % Load all chronometer data first so the joint objective can access them.
 fprintf("Loading detrital data...\n");
 chron_data = struct();   % chron_data(c).age, .sig, .N, .AminB, .AmaxB, etc.
+tsf_group_col = find(strcmpi(chron_cfg.Properties.VariableNames, 'TSFGroup'), 1);
+estimate_tsf_col = find(strcmpi(chron_cfg.Properties.VariableNames, 'EstimateTSF'), 1);
 
 for c = 1:n_chron
     chron     = char(chron_cfg.Chronometer(c));
@@ -508,9 +529,27 @@ for c = 1:n_chron
         chron_data(c).age_max_filt = Inf;
     end
     if tsf_mode == "iterative"
-        chron_data(c).tsf_group = strtrim(string(chron_cfg.TSFGroup(c)));
-        chron_data(c).estimate_tsf = parse_config_logical( ...
-            chron_cfg.EstimateTSF(c), "EstimateTSF", chron);
+        % Blank or absent TSFGroup means this chronometer gets its own
+        % independent source-weight curve. Matching labels opt into sharing.
+        chron_data(c).tsf_group = string(chron);
+        if ~isempty(tsf_group_col)
+            configured_group = strtrim(string(chron_cfg{c, tsf_group_col}));
+            if ~ismissing(configured_group) && strlength(configured_group) > 0
+                chron_data(c).tsf_group = configured_group;
+            end
+        end
+
+        % Iterative estimation is the default. Users can explicitly hold a
+        % chronometer or group fixed to hypsometry with EstimateTSF=false.
+        chron_data(c).estimate_tsf = true;
+        if ~isempty(estimate_tsf_col)
+            configured_estimate = string(chron_cfg{c, estimate_tsf_col});
+            if ~ismissing(configured_estimate) && ...
+                    strlength(strtrim(configured_estimate)) > 0
+                chron_data(c).estimate_tsf = parse_config_logical( ...
+                    chron_cfg{c, estimate_tsf_col}, "EstimateTSF", chron);
+            end
+        end
     else
         chron_data(c).tsf_group = "fixed_hypsometry";
         chron_data(c).estimate_tsf = false;

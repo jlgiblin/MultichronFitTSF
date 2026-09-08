@@ -145,15 +145,15 @@ Rows with NaN ages, NaN errors, or non-positive errors are automatically exclude
 
 The main file you edit between catchments. One row per chronometer plus one row for the hypsometry.
 
-> **Using fewer than 4 chronometers?** No code changes needed. Simply include only the chronometers you have and leave the rest out. The joint solver automatically builds ordering constraints from whatever is present — 1 pair for 2 chronometers, 3 pairs for 3, 6 pairs for 4. With only one chronometer the script runs normally with no ordering penalty applied.
+> **Using fewer than 4 chronometers?** No code changes are needed. Include only the chronometers you have. The solver constructs ordering constraints between rows with distinct, finite closure temperatures. With one chronometer—or with closure temperatures left blank—the script runs without the corresponding ordering penalties.
 
 ```csv
-Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFGroup,EstimateTSF
-Hypsometry,WP_Hypso.csv,,,,,,iterative,,
-ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,,apatite,true
-ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,,zircon,true
-ApPb,WP_ApPb.csv,0.1,15,0.5,0,98,,apatite,true
-Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,,hornblende,false
+Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,ClosureTemperature_C,TSFMode,TSFGroup,EstimateTSF
+Hypsometry,WP_Hypso.csv,,,,,,,iterative,,
+ApHe,WP_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
+ZHe,WP_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
+ApPb,WP_ApPb.csv,0.1,15,0.5,0,98,460,,apatite,true
+Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,570,,hornblende,false
 ```
 
 **Optional columns on the Hypsometry row** (override global defaults):
@@ -164,18 +164,22 @@ Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf,,hornblende,false
   estimated source weights (default 0.4; 0 = no update, 1 = full update)
 - `TSFSmoothSpan`: moving-mean span in equal-area bins (default 3; 1 = none)
 
-**Chronometer-row columns used in iterative mode:**
+**Optional chronometer-row columns:**
 
-- `TSFGroup`: chronometers with the same label share one effective
-  source-weight curve. Labels are user-defined and case-insensitive.
+- `ClosureTemperature_C`: nominal closure temperature used to construct the
+  ordering constraints. It does not otherwise change the age model.
+- `TSFGroup`: matching labels share one effective source-weight curve in
+  iterative mode. A blank group gives that chronometer an independent curve.
+  Labels are entirely user-defined and case-insensitive.
 - `EstimateTSF`: `true` estimates the group's weights; `false` holds that
-  group to the measured hypsometry. All rows in one group must agree.
+  group to the measured hypsometry. Blank defaults to `true`. All rows in one
+  named group must agree.
 
 These columns are explicit because sharing weights is a scientific choice,
 not something the code should infer from a system abbreviation. For example,
-ApHe and ApPb may share an `apatite` group, while ZHe may use `zircon` and a
-poorly resolved Hbl profile may use `hornblende,false`. Other groupings and
-chronometers work without editing the source code.
+ApHe and ApPb may share an `apatite` group, while a blank ZHe group remains
+independent and a poorly resolved Hbl profile may use `hornblende,false`.
+Other groupings and chronometers work without editing the source code.
 
 For an initial iterative run, keep bootstrap disabled until the convergence
 history has been inspected:
@@ -220,8 +224,9 @@ expensive than a fixed bootstrap. Inspect
 | `Lambda` | Curvature smoothness regularization weight. Use 0.0 for AHe/ZHe; 0.5 for ApPb; 1.0–2.0 for HblAr |
 | `AgeMinFilter` | Exclude grains younger than this (Ma). Use 0 for none |
 | `AgeMaxFilter` | Exclude grains older than this (Ma). Use Inf for none |
-| `TSFGroup` | User-defined source-weight group; required on chronometer rows in iterative mode |
-| `EstimateTSF` | `true` estimates the group; `false` keeps it fixed to measured hypsometry |
+| `ClosureTemperature_C` | User-defined nominal closure temperature used only for ordering |
+| `TSFGroup` | Optional source-weight group; blank means independent, matching labels share weights |
+| `EstimateTSF` | `true` estimates the group; `false` keeps it fixed; blank defaults to `true` |
 
 Filters should be applied with geological justification only (e.g., to exclude grains from older magmatic sources). All filtering decisions should be documented in your methods.
 
@@ -229,7 +234,15 @@ Filters should be applied with geological justification only (e.g., to exclude g
 
 ## Closure temperatures
 
-Hardcoded defaults from Hodges (2014) Table 2:
+Enter the nominal closure temperature appropriate to each dataset in
+`ClosureTemperature_C`. These values determine only the order and relative
+spacing of the age–elevation constraints; the code does not use them as a
+diffusion model. Because closure temperature can depend on mineral kinetics,
+grain properties, cooling rate, and the chosen calibration, users should
+select and document values appropriate to their application.
+
+For backward compatibility, recognized blank entries fall back to these
+built-in values from Hodges (2014) Table 2:
 
 | Chronometer | Tc (°C) |
 |-------------|---------|
@@ -238,7 +251,8 @@ Hardcoded defaults from Hodges (2014) Table 2:
 | ApPb | 460 |
 | HblAr | 570 |
 
-Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for non-standard systems.
+Unrecognized chronometers with a blank closure temperature are still fitted,
+but are omitted from the ordering penalty.
 
 ---
 
