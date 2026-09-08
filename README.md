@@ -5,7 +5,7 @@
 A two-script MATLAB toolkit that translates detrital thermochronologic datasets into explicit, spatially referenced age–elevation constraints for thermal-kinematic models such as Pecube and A2E. Developed by J. Giblin, Arizona State University.
 
 If you use this code, please cite:
-> Giblin, J. et al. (in prep). 
+> Giblin, J. et al. (in prep).
 > Gallagher, K., & Parra, M. (2020). A new approach to thermal history modelling with detrital thermochronological data. *Earth and Planetary Science Letters*, 529, 115872.
 
 ---
@@ -41,6 +41,14 @@ Both scripts use the same `catchment_name` / `base_dir` two-line convention and 
 - A **closure-temperature-scaled ordering penalty** enforces the physical requirement that lower-Tc systems yield younger ages than higher-Tc systems, without requiring explicit kinetic models
 - **Bootstrap uncertainty** propagated jointly across all chronometers (each resample reruns the full joint solve)
 - Per-grain **posterior source elevation distributions** computed for each chronometer
+- Optional experimental **light TSF sensitivity mode** that performs one
+  conservative shared-weight update away from hypsometry and one refit
+- Experimental **Gallagher-style NNLS mode** that alternates a regularized
+  nonnegative least-squares TSF estimate with A(z)/tau refits
+- Experimental **mineral-grouped Gallagher mode**: ApHe+ApPb share an
+  apatite TSF, ZHe has a zircon TSF, and uninformative Hbl remains hypsometric
+- Grouped-mode **bootstrap uncertainty** re-estimates the apatite and zircon
+  TSFs independently inside every grain resample
 - Config-file driven: **only two lines change** between catchment runs
 
 ---
@@ -150,6 +158,69 @@ Hbl,WP_Hbl.csv,0.1,5,1.0,83,Inf
 **Optional columns on the Hypsometry row** (override global defaults):
 - `w_order`: ordering penalty weight (default 5.0)
 - `delta_min`: minimum age separation scaling in Ma (default 1.0)
+- `TSFMode`: `fixed`, `light`, `gallagher_nnls`, or `gallagher_grouped`
+- `TSFUpdateFraction`: fraction of the one-step posterior TSF update to use
+  in light mode, or the per-iteration relaxation step in Gallagher-NNLS mode
+  (default 0.4; 0 = no update, 1 = full update)
+- `TSFSmoothSpan`: moving-mean span in equal-area bins (default 3; 1 = none)
+
+Example Hypsometry row for a light-TSF sensitivity run:
+
+```csv
+Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,TSFMode,TSFUpdateFraction,TSFSmoothSpan
+Hypsometry,WP_Hypso.csv,,,,,,light,0.4,3
+```
+
+`light` is deliberately a sensitivity test, not a fully sampled Gallagher
+and Parra TSF inversion. It first obtains the fixed-hypsometry solution,
+pools the grain posterior source probabilities across chronometers, smooths
+and shrinks that single proposed weight update toward hypsometry, and then
+refits once. Both solutions are retained in the outputs.
+
+For an initial Gallagher-NNLS pilot, set these values in the script and keep
+bootstrap disabled until the convergence history has been inspected:
+
+```matlab
+tsf_mode                    = "gallagher_nnls";
+tsf_update_fraction         = 0.4;
+tsf_smooth_span             = 3;
+tsf_nnls_max_outer          = 10;
+tsf_nnls_hypsometry_pull    = 0.25;
+tsf_nnls_smoothness         = 1.0;
+tsf_nnls_no_improve_patience = 3;
+do_bootstrap                = false;
+```
+
+Because the NNLS density objective is not identical to the grain likelihood,
+the solver retains the lowest-NLL iteration and stops after the configured
+number of consecutive likelihood deteriorations. The selected iteration is
+identified in `tsf_nnls_convergence.csv`.
+
+For the mineral-grouped sensitivity test, change only:
+
+```matlab
+tsf_mode = "gallagher_grouped";
+```
+
+The default grouping is ApHe+ApPb = `apatite`, ZHe = `zircon`, and Hbl =
+`hornblende_fixed`. This is an effective dated-mineral sourcing sensitivity,
+not proof that erosion itself differs among mineral systems.
+
+After the unbootstrapped grouped run has been checked for convergence, use a
+small uncertainty pilot before a final run:
+
+```matlab
+tsf_mode                   = "gallagher_grouped";
+tsf_nnls_max_outer         = 40;  % main-data solution
+tsf_nnls_boot_max_outer    = 20;  % cap within each resample
+do_bootstrap               = true;
+n_boot                     = 20;
+```
+
+Every resample first obtains its own fixed-hypsometry fit and then performs a
+guarded grouped TSF inversion. This is intentionally more expensive than the
+fixed or light bootstrap. Inspect `bootstrap_tsf_convergence_summary.csv`
+before increasing `n_boot`.
 
 #### Config column descriptions
 
@@ -188,6 +259,12 @@ Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for
 |------|-------------|
 | `predicted_bedrock_transect_<Chron>.csv` | Best-fit A(z): elevation, hypsometric weight, predicted age per bin |
 | `predicted_bedrock_transect_<Chron>_CI.csv` | Same plus bootstrap median, 16th/84th percentile CI, ±1σ columns |
+| `tsf_weights_shared.csv` | Hypsometric weights, raw posterior and NNLS updates, selected model TSF, relative yield, and cumulative distributions |
+| `tsf_weights_grouped.csv` | Long-format grouped TSFs with group membership, raw updates, relative yield, and cumulative distributions |
+| `tsf_nnls_convergence.csv` | Gallagher-NNLS outer-iteration history: NLL, weight change, TSF distance from hypsometry, and NNLS fit SSE |
+| `tsf_weights_bootstrap_CI.csv` | Light-mode TSF median and 16th/84th percentiles after re-estimating the TSF in each resample |
+| `tsf_weights_grouped_bootstrap_CI.csv` | Group-specific best-fit TSFs and bootstrap median/16th/84th percentiles |
+| `bootstrap_tsf_convergence_summary.csv` | Per-resample grouped inversion success, NLL change, selected iteration, and stopping reason |
 | `grain_expected_source_<Chron>.csv` | Per-grain posterior source elevation (mean, median, P05–P95, SD) |
 | `grain_posteriors_<Chron>.csv` | Full posterior matrix P(z\|age) — one column per grain, one row per elevation bin |
 | `summary_fit_params.csv` | One row per chronometer: grain count, NLL, τ, A_min, A_max, all settings |
@@ -216,6 +293,13 @@ Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for
 
 **Ordering penalty diagnostics:** Check `ordering_penalty_contributions.csv` after each run. Large residual penalties after the joint fit indicate the data are in genuine conflict with the expected Tc ordering — this is a geologically interesting result that warrants investigation.
 
+**Flexible TSF diagnostics:** `RelativeYieldVsHypsometry = 1` means the selected
+TSF matches area-proportional sourcing in that bin. Values above or below 1
+indicate relative over- or under-representation. Light-mode bootstrap runs
+re-estimate the conservative TSF separately within every grain resample.
+Grouped Gallagher bootstrap runs likewise re-estimate the apatite and zircon
+TSFs in every resample; the shared `gallagher_nnls` bootstrap remains disabled.
+
 ---
 
 ## Common issues
@@ -235,9 +319,15 @@ Edit the `TC_DEFAULTS` struct at the top of `MultichronFitTSF.m` to override for
 
 ## Key assumptions and limitations
 
-- **Hypsometric TSF**: Sediment production and transport efficiency are assumed uniform across elevation. Lithologic heterogeneity, glacial modification, and channel routing may violate this. Compare the implied source CDF (from grain posteriors) against the hypsometric CDF as a diagnostic.
-- **Monotonicity**: A(z) is constrained non-decreasing with elevation. Appropriate for steady-state exhumation through horizontal isotherms; may be inappropriate in structurally complex settings.
-- **Non-uniqueness**: Multiple A(z) functions can reproduce similar detrital distributions. Bootstrap CIs capture grain sampling uncertainty but not this fundamental non-uniqueness.
+- **Hypsometric TSF**: In fixed mode, sediment production, mineral fertility,
+  and transport efficiency are assumed uniform per unit catchment area. Light
+  mode relaxes this only as a conservative sensitivity test. The experimental
+  Gallagher-NNLS mode estimates a regularized shared TSF but is not a complete
+  reproduction of QTQt's transdimensional thermal-history inversion.
+- **Monotonicity**: A(z) is constrained non-decreasing with elevation. It may
+  be nonlinear and does not require a constant exhumation rate through time,
+  but it may be inappropriate in structurally complex catchments.
+- **Non-uniqueness**: Multiple A(z) functions can reproduce similar detrital distributions. Allowing both A(z) and the TSF to vary increases this tradeoff. Bootstrap CIs capture grain sampling uncertainty but not this fundamental non-uniqueness.
 - **Single τ per chronometer**: τ is a scalar that absorbs all unresolved variance. It cannot distinguish kinetic dispersion from lithologic mixing from model mismatch.
 - **Channel representative point (Step 2)**: The highest-flow-accumulation pixel at each elevation is used as the representative coordinate. This approximates the trunk stream routing path but may not be appropriate in catchments with complex drainage geometry.
 
