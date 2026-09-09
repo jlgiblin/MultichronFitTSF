@@ -4,8 +4,12 @@
 
 A two-script MATLAB toolkit that translates detrital thermochronologic datasets into explicit, spatially referenced age–elevation constraints for thermal-kinematic models such as Pecube and A2E. Developed by J. Giblin, Arizona State University.
 
+Current stable release: **v0.1.0**.
+
 If you use this code, please cite:
 > Gallagher, K., & Parra, M. (2020). A new approach to thermal history modelling with detrital thermochronological data. *Earth and Planetary Science Letters*, 529, 115872.
+
+Please also cite the software release using the metadata in `CITATION.cff`.
 
 ---
 
@@ -72,17 +76,16 @@ MultichronFitTSF/
 ├── MultichronFitTSF.m           ← Step 1: fit age-elevation transects
 ├── MultichronFitTSF_Georef.m    ← Step 2: georeference transects using DEM
 ├── README.md
-├── SampleA/                     ← example catchment subfolder
-│   ├── SampleA_config.csv       ← all catchment-specific settings
-│   ├── SampleA_Hypsometry.csv   ← catchment hypsometry
-│   ├── SampleA_ApHe.csv         ← detrital grain ages and errors
-│   ├── SampleA_ZHe.csv
-│   ├── SampleA_ApPb.csv
-│   ├── SampleA_Hbl.csv
-│   ├── SampleA_DEM.tif          ← clipped DEM GeoTIFF (Step 2)
-│   ├── SampleA_flowacc.tif      ← flow accumulation GeoTIFF (Step 2)
-│   └── figures_svg/             ← created automatically on first run
-└── Example/                     ← minimal working example files (EX_*)
+├── VERSION
+├── CITATION.cff
+├── CHANGELOG.md
+└── Example/                     ← minimal synthetic Step 1 files
+    ├── Example_config.csv
+    ├── Example_Hypso.csv
+    ├── Example_ApHe.csv
+    ├── Example_ZHe.csv
+    ├── Example_ApPb.csv
+    └── Example_HblAr.csv
 ```
 
 Each catchment has its own subfolder. **Only two lines in each script change between catchment runs** (`catchment_name` and `base_dir`).
@@ -107,7 +110,9 @@ The default first run leaves bootstrap off so the fit and source-weight
 convergence can be checked quickly. Then set `do_bootstrap = true` and use a
 small pilot (for example, `n_boot = 20`) before a final uncertainty run.
 
-A minimal working example with synthetic data is provided in `Example/`.
+A minimal working example with synthetic data is provided in `Example/`. To
+run it, set `catchment_name = "Example"` and set `base_dir` to the repository
+folder.
 
 ### Step 2: Georeference transects
 

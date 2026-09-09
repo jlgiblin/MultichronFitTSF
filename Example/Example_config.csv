@@ -1,0 +1,6 @@
+Chronometer,File,TauMin,AgeMargin,Lambda,AgeMinFilter,AgeMaxFilter,ClosureTemperature_C,TSFMode,TSFGroup,EstimateTSF
+Hypsometry,Example_Hypso.csv,,,,,,,fixed,,
+ApHe,Example_ApHe.csv,0.5,5,0.0,0,Inf,70,,apatite,true
+ZHe,Example_ZHe.csv,0.5,5,0.0,0,Inf,170,,,true
+ApPb,Example_ApPb.csv,0.1,15,0.5,0,Inf,460,,apatite,true
+HblAr,Example_HblAr.csv,0.1,5,1.0,0,Inf,570,,hornblende,false

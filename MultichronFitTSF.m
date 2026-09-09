@@ -6,11 +6,7 @@
 % that enforces the physical age hierarchy (lower-Tc systems yield younger
 % ages) without requiring explicit kinetic models.
 %
-% Supersedes fit_multichron_tsf.m (v4, independent solver).
-% Same folder structure, same config format, extended outputs.
-%
-% KEY DIFFERENCE FROM v4
-%   v4 fits each chronometer independently with fminsearch.
+% MODEL DESIGN
 %   This script fits all chronometers jointly with fminunc (quasi-Newton),
 %   adding a pairwise ordering penalty across all chronometer pairs scaled
 %   by their normalized closure temperature separation. This prevents
@@ -22,7 +18,7 @@
 %   2. Choose fixed or iterative source weighting in the config file.
 %   3. Run. All outputs are written into the catchment subfolder.
 %
-% FOLDER STRUCTURE  (unchanged from v4)
+% FOLDER STRUCTURE
 %   <base_dir>/
 %   ├── MultichronFitTSF.m
 %   ├── SampleA/
@@ -35,7 +31,7 @@
 %   │   └── figures_svg/
 %   └── ...
 %
-% CONFIG CSV FORMAT  (extended from v4)
+% CONFIG CSV FORMAT
 %   Required columns:
 %     Chronometer, File, TauMin, AgeMargin, Lambda, AgeMinFilter,
 %     AgeMaxFilter, TSFMode
@@ -77,7 +73,7 @@
 %   w_order controls penalty stiffness. Both are tunable below.
 %
 % OUTPUTS  (written to catchment subfolder)
-%   predicted_bedrock_transect_<Chron>.csv          (selected + fixed comparison)
+%   predicted_bedrock_transect_<Chron>.csv          (selected solution)
 %   predicted_bedrock_transect_<Chron>_CI.csv       (bootstrap CI)
 %   source_weighting.csv                            (fixed/iterative weights)
 %   source_weighting_convergence.csv                (iterative diagnostics)
@@ -85,23 +81,15 @@
 %   source_weighting_bootstrap_summary.csv          (bootstrap diagnostics)
 %   grain_posteriors_<Chron>.csv                    (optional)
 %   grain_expected_source_<Chron>.csv
-%   ordering_violations.csv                         (NEW: pre-fit violations)
-%   ordering_penalty_contributions.csv              (NEW: per-pair penalty)
-%   summary_fit_params.csv                          (extended from v4)
+%   ordering_violations_preFit.csv                  (pre-fit violations)
+%   ordering_penalty_contributions.csv              (per-pair penalty)
+%   summary_fit_params.csv
 %   figures_svg/
 %
-% CHANGELOG
-%   v6 : User-facing fixed/iterative source-weighting modes; explicit,
-%        optional grouping and closure temperatures in the config table;
-%        iterative bootstrap and source-weight convergence diagnostics.
-%   v5 : Joint fminunc optimizer with Tc-scaled pairwise ordering penalty.
-%        Name-variant lookup for flexible chronometer labelling.
-%        Ordering diagnostics (violation log, penalty contributions).
-%        w_order / delta_min exposed as tunable parameters with config override.
-%        Bootstrap calls joint solver per resample.
-%   v4 : Config-file-driven workflow. Per-chronometer age filters.
-%   v3 : Per-chronometer settings struct. Summary CSV.
-%   v2 : Bug fixes (interp1, zu shadowing, cummax, tau init, quantile).
+% RELEASE
+%   v0.1.0: Public fixed/iterative source-weighting modes, explicit optional
+%   groups and closure temperatures, reproducible serial/parallel bootstrap
+%   uncertainty, source-weight diagnostics, and DEM coordinate assignment.
 
 clear; close all; clc;
 
@@ -172,9 +160,6 @@ delta_min_Ma = 1.0;
 % tsf_smooth_span is a moving-mean span in equal-area bin index. Use 1 to
 % disable smoothing. These values can be overridden on the Hypsometry row
 % of the config CSV using TSFMode, TSFUpdateFraction, and TSFSmoothSpan.
-%tsf_smooth_span orginal=3
-%tsf_update_fraction=0.4
-%
 tsf_mode            = "";  % required config value; intentionally no default
 tsf_update_fraction = 0.4;
 tsf_smooth_span     = 3;
@@ -757,6 +742,10 @@ tsf_weights = pz;
 source_weight_raw = nan(Nz, 1);
 chron_tsf_group = repmat("fixed_hypsometry", n_chron, 1);
 TSFConvergence = table();
+% Bootstrap helper arguments are unused in fixed mode, but initialize them
+% so fixed-source-weight runs can enter the shared bootstrap code path.
+tsf_group_indices = {};
+tsf_group_fixed = false(0, 1);
 
 if tsf_mode == "iterative"
     fprintf("Phase 2b: iterative source-weight inversion...\n");
